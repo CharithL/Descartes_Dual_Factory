@@ -48,6 +48,64 @@ def step_complete(step_name, output_dir):
     return False
 
 
+def _compile_mechanisms():
+    """Compile NEURON .mod mechanisms if not already compiled.
+
+    Searches for mechanisms/ directory at project root.  If .mod files
+    exist but no compiled shared library is found, runs nrnivmodl.
+    """
+    import os
+    import subprocess
+
+    project_root = Path(__file__).parent.parent
+    mech_dir = project_root / 'mechanisms'
+
+    if not mech_dir.is_dir():
+        print("  [mechanisms] No mechanisms/ directory found -- skipping compilation")
+        return
+
+    mod_files = list(mech_dir.glob('*.mod'))
+    if not mod_files:
+        print("  [mechanisms] No .mod files found in mechanisms/")
+        return
+
+    # Check if already compiled (look for x86_64/libnrnmech.so or similar)
+    compiled_paths = [
+        mech_dir / 'x86_64' / '.libs' / 'libnrnmech.so',
+        mech_dir / 'x86_64' / 'libnrnmech.so',
+        mech_dir / 'x86_64' / 'special',
+        mech_dir / 'aarch64' / '.libs' / 'libnrnmech.so',
+        mech_dir / 'aarch64' / 'libnrnmech.so',
+    ]
+    for cp in compiled_paths:
+        if cp.exists():
+            print(f"  [mechanisms] Already compiled: {cp}")
+            return
+
+    # Compile
+    print(f"  [mechanisms] Compiling {len(mod_files)} .mod files with nrnivmodl...")
+    try:
+        result = subprocess.run(
+            ['nrnivmodl', '.'],
+            cwd=str(mech_dir),
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0:
+            print("  [mechanisms] Compilation successful!")
+        else:
+            print(f"  [mechanisms] nrnivmodl FAILED (rc={result.returncode})")
+            if result.stderr:
+                # Print last 10 lines of stderr
+                lines = result.stderr.strip().split('\n')
+                for line in lines[-10:]:
+                    print(f"    {line}")
+    except FileNotFoundError:
+        print("  [mechanisms] nrnivmodl not found (NEURON not installed?).")
+        print("  [mechanisms] Install NEURON: pip install neuron  or  conda install -c conda-forge neuron")
+    except subprocess.TimeoutExpired:
+        print("  [mechanisms] nrnivmodl timed out after 120s")
+
+
 def run_step_1_simulate(force=False):
     """Step 1: Run 500 Bahl simulations."""
     print("\n" + "=" * 70)
@@ -57,6 +115,9 @@ def run_step_1_simulate(force=False):
     if not force and step_complete('simulate', BAHL_TRIAL_DIR):
         print("  SKIP: Simulation data already exists.")
         return
+
+    # Compile NEURON mechanisms before simulation
+    _compile_mechanisms()
 
     try:
         from l5pc.simulation.run_bahl_sim import run_all_trials
