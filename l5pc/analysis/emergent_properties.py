@@ -15,6 +15,7 @@ import numpy as np
 from l5pc.config import (
     BURST_ISI_THRESHOLD_MS,
     RECORDING_DT_MS,
+    SIM_DURATION_MS,
     T_STEPS,
     BAHL_TRIAL_DIR,
     BAHL_REGIONS,
@@ -39,12 +40,18 @@ def compute_emergent_properties(recordings, spike_times=None, dt_ms=None):
     These are the Level C probing targets that capture emergent
     functional properties of L5PC dendritic computation:
 
-    - Ca_hotzone_peak:     Peak [Ca2+]i in the nexus/hot zone region (mM)
-    - Ca_hotzone_mean:     Mean [Ca2+]i in the hot zone over the trial (mM)
-    - burst_ratio:         Fraction of spikes in bursts (ISI < 10ms)
+    - Ca_hotzone_peak:        Peak [Ca2+]i in the nexus/hot zone region (mM)
+    - Ca_hotzone_mean:        Mean [Ca2+]i in the hot zone over the trial (mM)
+    - burst_ratio:            Fraction of spikes in bursts (ISI < 10ms)
     - dendritic_Ca_amplitude: Peak voltage deflection in tuft during Ca spike (mV)
-    - AHP_depth:           Post-spike after-hyperpolarization depth (mV)
-    - I_Na_peak:           Maximum sodium current magnitude during AP (negative, nA)
+    - AHP_depth:              Post-spike after-hyperpolarization depth (mV)
+    - I_Na_peak:              Maximum sodium current magnitude during AP (negative, nA)
+    - mean_firing_rate_hz:    Mean somatic firing rate over the trial (Hz)
+    - first_spike_latency_ms: Time to first somatic spike from trial start (ms)
+    - mean_isi_ms:            Mean inter-spike interval (ms)
+    - cv_isi:                 Coefficient of variation of ISI (dimensionless)
+    - bac_detected:           Whether a dendritic Ca spike was detected (0 or 1)
+    - n_dendritic_Ca_spikes:  Number of dendritic Ca spike events detected
 
     Args:
         recordings: dict with keys corresponding to recorded variables.
@@ -115,6 +122,39 @@ def compute_emergent_properties(recordings, spike_times=None, dt_ms=None):
 
     # --- Spike count (auxiliary) ---
     props['n_spikes'] = int(len(spike_times))
+
+    # --- Firing rate properties ---
+    sim_duration_s = (dt_ms * T_STEPS) / 1000.0 if V_soma is not None else SIM_DURATION_MS / 1000.0
+    n_spikes = len(spike_times)
+    props['mean_firing_rate_hz'] = float(n_spikes / sim_duration_s) if sim_duration_s > 0 else 0.0
+
+    if n_spikes > 0:
+        props['first_spike_latency_ms'] = float(spike_times[0])
+    else:
+        props['first_spike_latency_ms'] = float(SIM_DURATION_MS)  # No spike → max latency
+
+    # --- ISI statistics ---
+    if n_spikes >= 2:
+        isis = np.diff(spike_times)
+        props['mean_isi_ms'] = float(np.mean(isis))
+        isi_std = float(np.std(isis))
+        props['cv_isi'] = isi_std / props['mean_isi_ms'] if props['mean_isi_ms'] > 0 else 0.0
+    else:
+        props['mean_isi_ms'] = 0.0
+        props['cv_isi'] = 0.0
+
+    # --- BAC detection via dendritic Ca spike events ---
+    # A dendritic Ca spike coincident with somatic firing indicates
+    # backpropagation-activated calcium firing (BAC).
+    V_dend_for_ca = V_tuft if V_tuft is not None else V_nexus
+    if V_dend_for_ca is not None:
+        ca_events = detect_dendritic_ca_events(V_dend_for_ca, threshold_mv=-20.0,
+                                                min_width_ms=5.0, dt_ms=dt_ms)
+        props['n_dendritic_Ca_spikes'] = int(len(ca_events))
+        props['bac_detected'] = 1.0 if (len(ca_events) > 0 and n_spikes > 0) else 0.0
+    else:
+        props['n_dendritic_Ca_spikes'] = 0
+        props['bac_detected'] = 0.0
 
     return props
 
@@ -245,6 +285,132 @@ def detect_dendritic_ca_events(V_dend, threshold_mv=-20.0, min_width_ms=5.0,
 # ---------------------------------------------------------------------------
 # Batch computation
 # ---------------------------------------------------------------------------
+
+def patch_level_c_from_saved_data(trial_dir=None):
+    """Recompute Level C properties from saved somatic voltage in existing trial files.
+
+    This is a lightweight alternative to re-simulation that adds spike-timing
+    properties (mean_firing_rate_hz, first_spike_latency_ms, mean_isi_ms,
+    cv_isi) and an approximate bac_detected flag to existing trial data.
+
+    The bac_detected flag is derived from the already-stored
+    dendritic_Ca_amplitude: if the peak dendritic voltage exceeded -20 mV
+    (the Ca-spike threshold used in detect_dendritic_ca_events) AND the
+    trial had somatic spikes, we mark bac_detected = 1.
+
+    This function modifies trial .npz files IN-PLACE and updates
+    variable_names.json.
+
+    Args:
+        trial_dir: directory containing trial .npz files.
+            Defaults to config.BAHL_TRIAL_DIR.
+
+    Returns:
+        int: number of trials patched.
+    """
+    trial_dir = Path(trial_dir or BAHL_TRIAL_DIR)
+
+    var_meta = load_variable_names(trial_dir)
+    old_keys = None
+    if var_meta:
+        for mk in ['level_C_keys', 'level_C']:
+            candidate = var_meta.get(mk)
+            if isinstance(candidate, list) and len(candidate) > 0:
+                old_keys = candidate
+                break
+
+    trial_files = sorted(trial_dir.glob('trial_*.npz'))
+    if not trial_files:
+        logger.warning("No trial files in %s, nothing to patch.", trial_dir)
+        return 0
+
+    new_keys = None
+    n_patched = 0
+
+    for fpath in trial_files:
+        data = dict(np.load(fpath))
+
+        # Somatic voltage
+        V_soma = data.get('output', None)
+        if V_soma is None:
+            continue
+        V_soma = V_soma.flatten()
+
+        dt_ms = RECORDING_DT_MS
+        spike_times = detect_spikes(V_soma, threshold=0.0, dt_ms=dt_ms)
+        n_spikes = len(spike_times)
+        sim_duration_s = SIM_DURATION_MS / 1000.0
+
+        # Build new properties dict from somatic voltage
+        new_props = {}
+        new_props['mean_firing_rate_hz'] = float(n_spikes / sim_duration_s) if sim_duration_s > 0 else 0.0
+        new_props['first_spike_latency_ms'] = float(spike_times[0]) if n_spikes > 0 else float(SIM_DURATION_MS)
+
+        if n_spikes >= 2:
+            isis = np.diff(spike_times)
+            new_props['mean_isi_ms'] = float(np.mean(isis))
+            isi_std = float(np.std(isis))
+            new_props['cv_isi'] = isi_std / new_props['mean_isi_ms'] if new_props['mean_isi_ms'] > 0 else 0.0
+        else:
+            new_props['mean_isi_ms'] = 0.0
+            new_props['cv_isi'] = 0.0
+
+        # Approximate BAC from existing dendritic_Ca_amplitude
+        # The existing Level C stores dendritic_Ca_amplitude = max(V_dend).
+        # If V_dend ever exceeded -20 mV (Ca spike threshold) AND there were
+        # somatic spikes, we flag BAC detected.
+        existing_level_c = data.get('level_C_emerge', None)
+        dend_ca_amp = None
+        if existing_level_c is not None and old_keys is not None:
+            if 'dendritic_Ca_amplitude' in old_keys:
+                dend_ca_amp_idx = old_keys.index('dendritic_Ca_amplitude')
+                if dend_ca_amp_idx < len(existing_level_c):
+                    dend_ca_amp = float(existing_level_c[dend_ca_amp_idx])
+
+        if dend_ca_amp is not None:
+            new_props['bac_detected'] = 1.0 if (dend_ca_amp > -20.0 and n_spikes > 0) else 0.0
+        else:
+            new_props['bac_detected'] = 0.0
+        # n_dendritic_Ca_spikes can only be computed from raw V_dend
+        # traces, which aren't saved. Set to -1 to indicate "unavailable"
+        # (will be computed correctly on next re-simulation).
+        new_props['n_dendritic_Ca_spikes'] = -1
+
+        # Merge: keep all existing properties, add/overwrite new ones
+        merged = {}
+        if existing_level_c is not None and old_keys is not None:
+            for j, k in enumerate(old_keys):
+                if j < len(existing_level_c):
+                    merged[k] = float(existing_level_c[j])
+        merged.update(new_props)
+
+        # Convert to sorted array
+        merged_keys = sorted(merged.keys())
+        level_c_array = np.array(
+            [merged[k] for k in merged_keys], dtype=np.float32
+        )
+
+        if new_keys is None:
+            new_keys = merged_keys
+
+        # Re-save with updated Level C
+        data['level_C_emerge'] = level_c_array
+        np.savez_compressed(fpath, **data)
+        n_patched += 1
+
+    # Update variable_names.json
+    if new_keys and var_meta is not None:
+        import json
+        var_meta['level_C_keys'] = new_keys
+        meta_path = trial_dir / 'variable_names.json'
+        with open(meta_path, 'w') as f:
+            json.dump(var_meta, f, indent=2)
+        logger.info("Updated level_C_keys in %s: %s", meta_path, new_keys)
+
+    logger.info("Patched Level C in %d trials (now %d properties).",
+                n_patched, len(new_keys or []))
+    return n_patched
+
 
 def compute_all_emergent(trial_dir=None, save_path=None, n_trials=None):
     """Compute Level C targets for all trials and save.

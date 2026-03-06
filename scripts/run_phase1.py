@@ -145,6 +145,39 @@ def run_step_1_simulate(force=False):
     print("  DONE: Simulation complete.")
 
 
+def _check_model_quality(model_path, hidden_size, data_dir):
+    """Compute cross-condition correlation for a trained model.
+
+    If CC is low (< 0.5), the model hasn't converged and its
+    probing results are meaningless.
+    """
+    import torch
+    import numpy as np
+    from l5pc.surrogates.lstm import L5PC_LSTM
+    from l5pc.surrogates.train import create_dataset
+    from l5pc.utils.metrics import cross_condition_correlation
+    from l5pc.config import TOTAL_SYN, N_LSTM_LAYERS
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = L5PC_LSTM(
+        input_dim=TOTAL_SYN, hidden_size=hidden_size,
+        n_layers=N_LSTM_LAYERS,
+    ).to(device)
+    state_dict = torch.load(model_path, map_location=device, weights_only=True)
+    model.load_state_dict(state_dict)
+    model.eval()
+
+    test_ds = create_dataset(data_dir, "test")
+    test_x = test_ds.tensors[0].to(device)
+    test_y = test_ds.tensors[1].numpy()  # (n_trials, T) raw voltage
+
+    with torch.no_grad():
+        pred = model(test_x)[0].cpu().numpy()  # may be in normalised scale
+
+    cc = cross_condition_correlation(pred, test_y)
+    return cc
+
+
 def run_step_2_train(force=False):
     """Step 2: Train LSTM surrogates at 3 hidden sizes."""
     print("\n" + "=" * 70)
@@ -167,6 +200,25 @@ def run_step_2_train(force=False):
             hidden_size=h,
             save_path=str(model_path)
         )
+
+    # --- Cross-condition correlation diagnostic ---
+    # Verify each model has actually converged. CC < 0.5 means the
+    # model's hidden states are meaningless for probing.
+    print("\n  --- Model Quality Check (Cross-Condition Correlation) ---")
+    for h in HIDDEN_SIZES:
+        model_path = SURROGATE_DIR / f'lstm_h{h}_best.pt'
+        if model_path.exists():
+            cc = _check_model_quality(model_path, h, str(BAHL_TRIAL_DIR))
+            if cc > 0.8:
+                quality = "GOOD"
+            elif cc > 0.5:
+                quality = "OK"
+            else:
+                quality = "POOR -- probing results unreliable!"
+            print(f"    h={h:3d}:  CC = {cc:.4f}  [{quality}]")
+        else:
+            print(f"    h={h:3d}:  (no checkpoint)")
+
     print("  DONE: All LSTM models trained.")
 
 
@@ -197,6 +249,26 @@ def run_step_4_probe(force=False):
     if not force and step_complete('probe', RESULTS_DIR):
         print("  SKIP: Probing results already exist.")
         return
+
+    # --- Patch Level C with spike-timing properties (if not already present) ---
+    # This adds mean_firing_rate_hz, first_spike_latency_ms, mean_isi_ms,
+    # cv_isi, and bac_detected to existing trial data without re-simulation.
+    from l5pc.analysis.emergent_properties import patch_level_c_from_saved_data
+    from l5pc.utils.io import load_variable_names
+    var_meta = load_variable_names(str(BAHL_TRIAL_DIR))
+    existing_keys = []
+    if var_meta:
+        for mk in ['level_C_keys', 'level_C']:
+            candidate = var_meta.get(mk)
+            if isinstance(candidate, list):
+                existing_keys = candidate
+                break
+    if 'bac_detected' not in existing_keys:
+        print("  Patching Level C with spike-timing properties + BAC detection...")
+        n_patched = patch_level_c_from_saved_data(str(BAHL_TRIAL_DIR))
+        print(f"  Patched {n_patched} trials.")
+    else:
+        print("  Level C already includes bac_detected, skip patching.")
 
     from l5pc.probing.ridge_probe import run_all_probes
     run_all_probes(
