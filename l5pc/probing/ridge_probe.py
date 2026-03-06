@@ -277,35 +277,152 @@ _LEVEL_KEYS = {
 def _load_hidden_states(hidden_dir, hidden_size, trained=True):
     """Load trial-averaged hidden states.
 
-    Expected file convention:
-        {hidden_dir}/h{hidden_size}_{'trained'|'untrained'}.npy
-    Shape: (n_trials, hidden_size)
+    Supports two file conventions (tried in order):
+        1. {hidden_dir}/lstm_{hidden_size}_{tag}.npz  (from extract_hidden.py)
+        2. {hidden_dir}/h{hidden_size}_{tag}.npy       (legacy flat array)
+
+    If the loaded array has shape (n_trials * T_STEPS, hidden_dim), it is
+    automatically reshaped to (n_trials, T_STEPS, hidden_dim) and averaged
+    over the time axis to produce (n_trials, hidden_dim).
+
+    Shape returned: (n_trials, hidden_size)
     """
+    from l5pc.config import T_STEPS, TEST_SPLIT
+
     tag = 'trained' if trained else 'untrained'
-    path = Path(hidden_dir) / f'h{hidden_size}_{tag}.npy'
-    if not path.exists():
-        raise FileNotFoundError(f"Hidden states not found: {path}")
-    return np.load(path)
+    hidden_dir = Path(hidden_dir)
+
+    candidates = [
+        hidden_dir / f'lstm_{hidden_size}_{tag}.npz',
+        hidden_dir / f'h{hidden_size}_{tag}.npz',
+        hidden_dir / f'h{hidden_size}_{tag}.npy',
+    ]
+
+    path = None
+    for c in candidates:
+        if c.exists():
+            path = c
+            break
+
+    if path is None:
+        raise FileNotFoundError(
+            f"Hidden states not found for h={hidden_size} ({tag}). "
+            f"Searched: {[str(c) for c in candidates]}"
+        )
+
+    # Load array depending on file format
+    if path.suffix == '.npz':
+        data = np.load(path)
+        if 'hidden_states' in data:
+            H = data['hidden_states']
+        else:
+            H = data[data.files[0]]
+    else:
+        H = np.load(path)
+
+    # If timestep-level data, reshape and trial-average
+    # Expected timestep shape: (n_trials * T_STEPS, hidden_dim)
+    # Target shape:            (n_trials, hidden_dim)
+    n_total = H.shape[0]
+    if n_total > TEST_SPLIT * 2:
+        n_trials = n_total // T_STEPS
+        if n_trials * T_STEPS == n_total and n_trials > 0:
+            logger.info(
+                "Trial-averaging hidden states: (%d, %d) -> (%d, %d)",
+                n_total, H.shape[1], n_trials, H.shape[1],
+            )
+            H = H.reshape(n_trials, T_STEPS, -1).mean(axis=1)
+
+    return H
 
 
 def _load_targets(targets_dir, level):
     """Load target variables for a given level.
 
-    Expected file convention:
-        {targets_dir}/{level}_targets.npz
-    Each key in the npz is a variable name, value shape (n_trials,).
+    Tries three approaches in order:
+        1. Aggregate file: {targets_dir}/{level_key}.npz
+        2. Alternate name:  {targets_dir}/level_{level}_targets.npz
+        3. Individual trial files (test split): loads each trial_{i}.npz
+           and computes the trial-mean of each variable over time.
+
+    Returns
+    -------
+    targets : dict
+        Mapping variable_name -> ndarray of shape (n_trials,).
     """
     key = _LEVEL_KEYS[level]
-    path = Path(targets_dir) / f'{key}.npz'
-    if not path.exists():
-        # Fallback: try level letter
-        path = Path(targets_dir) / f'level_{level}_targets.npz'
-    if not path.exists():
+    targets_dir = Path(targets_dir)
+
+    # --- Approach 1 & 2: aggregate files ---
+    for fname in [f'{key}.npz', f'level_{level}_targets.npz']:
+        path = targets_dir / fname
+        if path.exists():
+            data = np.load(path)
+            return {k: data[k] for k in data.files}
+
+    # --- Approach 3: reconstruct from individual trial files ---
+    from l5pc.utils.io import load_all_trials, load_variable_names
+
+    trials = load_all_trials(targets_dir, split='test')
+    if not trials:
         raise FileNotFoundError(
-            f"Target file not found for level {level} in {targets_dir}"
+            f"No target data found for level {level} in {targets_dir}"
         )
-    data = np.load(path)
-    return {k: data[k] for k in data.files}
+
+    first_trial = trials[0]
+    if key not in first_trial:
+        raise FileNotFoundError(
+            f"Level key '{key}' not found in trial data. "
+            f"Available keys: {list(first_trial.keys())}"
+        )
+
+    arr0 = first_trial[key]
+    var_meta = load_variable_names(targets_dir)
+
+    if arr0.ndim == 1:
+        # Single variable: (T,) per trial -> trial-mean scalar
+        var_name = key
+        if var_meta:
+            for mk in var_meta:
+                if level.upper() in mk.upper() or level.lower() in mk.lower():
+                    names = var_meta[mk]
+                    if isinstance(names, list) and len(names) == 1:
+                        var_name = names[0]
+                    break
+        values = np.array([float(np.mean(t[key])) for t in trials])
+        return {var_name: values}
+
+    elif arr0.ndim == 2:
+        # Multiple variables: (T, n_vars) per trial -> trial-mean per var
+        n_vars = arr0.shape[1]
+
+        # Resolve variable names
+        names = None
+        if var_meta:
+            for mk in var_meta:
+                if level.upper() in mk.upper() or level.lower() in mk.lower():
+                    candidate = var_meta[mk]
+                    if isinstance(candidate, list) and len(candidate) == n_vars:
+                        names = candidate
+                        break
+        if names is None:
+            names = [f'{key}_{i}' for i in range(n_vars)]
+
+        targets = {}
+        for j, name in enumerate(names):
+            values = np.array([
+                float(np.mean(t[key][:, j]))
+                if t[key].ndim == 2 and t[key].shape[1] > j
+                else float(np.mean(t[key]))
+                for t in trials
+            ])
+            targets[name] = values
+        return targets
+
+    else:
+        raise FileNotFoundError(
+            f"Unexpected shape for level {level} data: {arr0.shape}"
+        )
 
 
 def run_probe(level, hidden_size, hidden_dir, targets_dir, save_path):

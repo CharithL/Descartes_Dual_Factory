@@ -139,7 +139,7 @@ def run_step_4_probe(force=False):
 
     from l5pc.probing.ridge_probe import run_all_probes
     run_all_probes(
-        hidden_dir=str(SURROGATE_DIR),
+        hidden_dir=str(SURROGATE_DIR / 'hidden'),
         targets_dir=str(BAHL_TRIAL_DIR),
         results_dir=str(RESULTS_DIR)
     )
@@ -180,7 +180,7 @@ def run_step_6_ablation(force=False):
     from l5pc.probing.ablation import run_all_ablations
     run_all_ablations(
         ridge_results_dir=str(RESULTS_DIR),
-        hidden_dir=str(SURROGATE_DIR),
+        hidden_dir=str(SURROGATE_DIR / 'hidden'),
         model_dir=str(SURROGATE_DIR),
         test_data_dir=str(BAHL_TRIAL_DIR),
         save_path=str(RESULTS_DIR / 'ablation_results.json')

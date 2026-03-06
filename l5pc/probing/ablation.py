@@ -317,11 +317,12 @@ def run_all_ablations(ridge_results_dir, hidden_dir, model_dir,
     all_results = {}
 
     for hs in HIDDEN_SIZES:
-        # Load model
-        model_path = model_dir / f'lstm_h{hs}.pt'
+        # Load model -- try both naming conventions from training
+        model_path = model_dir / f'lstm_h{hs}_best.pt'
         if not model_path.exists():
-            logger.warning("Model not found: %s, skipping h=%d",
-                           model_path, hs)
+            model_path = model_dir / f'lstm_h{hs}.pt'
+        if not model_path.exists():
+            logger.warning("Model not found for h=%d, skipping", hs)
             continue
 
         from l5pc.surrogates.lstm import L5PC_LSTM
@@ -331,12 +332,13 @@ def run_all_ablations(ridge_results_dir, hidden_dir, model_dir,
         model.load_state_dict(state_dict)
         _set_model_eval(model)
 
-        # Load hidden states
-        hs_path = hidden_dir / f'h{hs}_trained.npy'
-        if not hs_path.exists():
-            logger.warning("Hidden states not found: %s", hs_path)
+        # Load hidden states via shared loader (handles .npz and trial-averaging)
+        from l5pc.probing.ridge_probe import _load_hidden_states
+        try:
+            hidden_states = _load_hidden_states(hidden_dir, hs, trained=True)
+        except FileNotFoundError as e:
+            logger.warning("Hidden states not found for h=%d: %s", hs, e)
             continue
-        hidden_states = np.load(hs_path)
 
         # Convert test inputs to tensor
         test_inputs = torch.tensor(test_inputs_np, dtype=torch.float32)
