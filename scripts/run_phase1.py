@@ -78,7 +78,8 @@ def run_step_1_simulate(force=False):
     run_all_trials(
         n_trials=N_TRIALS,
         output_dir=str(BAHL_TRIAL_DIR),
-        seed=42
+        seed=42,
+        force=force,
     )
     print("  DONE: Simulation complete.")
 

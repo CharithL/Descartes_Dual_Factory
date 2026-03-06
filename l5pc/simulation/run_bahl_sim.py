@@ -59,7 +59,7 @@ from l5pc.utils.io import save_trial
 # Main runner
 # ---------------------------------------------------------------------------
 
-def run_all_trials(n_trials=None, output_dir=None, seed=42):
+def run_all_trials(n_trials=None, output_dir=None, seed=42, force=False):
     """Run all Bahl simulation trials and save results to disk.
 
     Parameters
@@ -70,6 +70,8 @@ def run_all_trials(n_trials=None, output_dir=None, seed=42):
         Directory to write trial .npz files. Defaults to config.BAHL_TRIAL_DIR.
     seed : int, optional
         Random seed for reproducible input generation. Default 42.
+    force : bool, optional
+        If True, overwrite existing trial files. Default False.
     """
     if n_trials is None:
         n_trials = N_TRIALS
@@ -114,7 +116,7 @@ def run_all_trials(n_trials=None, output_dir=None, seed=42):
 
         # --- Check if output already exists (restartability) ---
         trial_path = output_dir / f'trial_{trial_idx:03d}.npz'
-        if trial_path.exists():
+        if trial_path.exists() and not force:
             print(f"  [trial {trial_idx:3d}/{n_trials}] "
                   f"Already exists, skipping.")
             continue
