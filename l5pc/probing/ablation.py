@@ -65,7 +65,7 @@ def forward_with_clamp(model, test_inputs, clamp_dims, hidden_means):
     Returns
     -------
     output : ndarray, shape (n_trials, T)
-        Model output (spike probability) with clamped hidden states.
+        Model output (predicted voltage) with clamped hidden states.
     """
     device = next(model.parameters()).device
     test_inputs = test_inputs.to(device)
@@ -105,9 +105,9 @@ def forward_with_clamp(model, test_inputs, clamp_dims, hidden_means):
             h[-1] = h_last
 
             # Readout from (clamped) last-layer hidden state
-            logit = model.readout(h_last)  # (batch, 1)
-            prob = torch.sigmoid(logit).squeeze(-1)  # (batch,)
-            outputs.append(prob)
+            # No sigmoid -- output is raw voltage (matches lstm.py forward)
+            voltage = model.readout(h_last).squeeze(-1)  # (batch,)
+            outputs.append(voltage)
 
     output = torch.stack(outputs, dim=1)  # (batch, T)
     return output.cpu().numpy()
@@ -425,6 +425,11 @@ def run_all_ablations(ridge_results_dir, hidden_dir, model_dir,
 def _load_target_for_test(test_data_dir, level, var_name, test_trials):
     """Load a specific target variable from test trials.
 
+    Handles two data layouts:
+      - Time-series: arr.ndim==2, shape (T, n_vars) -> trial-mean per var
+      - Scalar vector (Level C): arr.ndim==1, shape (N_props,) -> each
+        element is already a scalar per trial, indexed by var_name.
+
     Returns ndarray (n_test_trials,) or None if not found.
     """
     level_key_map = {
@@ -436,32 +441,59 @@ def _load_target_for_test(test_data_dir, level, var_name, test_trials):
     if data_key is None:
         return None
 
+    from l5pc.utils.io import load_variable_names
+    var_meta = load_variable_names(test_data_dir)
+
     # Try loading from trial data
     values = []
     for t in test_trials:
         if data_key not in t:
             return None
         arr = t[data_key]
-        if arr.ndim == 1:
-            # Single variable
+
+        if arr.ndim == 1 and level == 'C':
+            # Level C: vector of N scalar properties (NOT a time series)
+            # Find the index of var_name in the property list
+            level_c_names = None
+            if var_meta:
+                for mk in ['level_C_keys', 'level_C']:
+                    candidate = var_meta.get(mk)
+                    if (isinstance(candidate, list)
+                            and len(candidate) == len(arr)):
+                        level_c_names = candidate
+                        break
+            if level_c_names is None:
+                return None
+            if var_name in level_c_names:
+                col_idx = level_c_names.index(var_name)
+                values.append(float(arr[col_idx]))
+            else:
+                return None
+
+        elif arr.ndim == 1:
+            # Single time-series variable: take trial-mean
             values.append(float(np.mean(arr)))
+
         elif arr.ndim == 2:
-            # Multiple variables -- need to find column index
-            from l5pc.utils.io import load_variable_names
-            var_meta = load_variable_names(test_data_dir)
-            if var_meta and f'level_{level}' in var_meta:
-                names = var_meta[f'level_{level}']
-            elif var_meta:
-                # Try alternate key patterns
-                names = None
-                for mk in var_meta:
-                    if level.lower() in mk.lower():
-                        names = var_meta[mk]
+            # Multiple time-series variables: (T, n_vars) -> trial-mean
+            n_vars = arr.shape[1]
+            names = None
+            if var_meta:
+                for mk in [f'level_{level}', f'level_{level}_keys']:
+                    candidate = var_meta.get(mk)
+                    if isinstance(candidate, list) and len(candidate) == n_vars:
+                        names = candidate
                         break
                 if names is None:
-                    names = [f'var_{i}' for i in range(arr.shape[1])]
-            else:
-                names = [f'var_{i}' for i in range(arr.shape[1])]
+                    # Try alternate key patterns
+                    for mk in var_meta:
+                        if level.lower() in mk.lower():
+                            candidate = var_meta[mk]
+                            if isinstance(candidate, list) and len(candidate) == n_vars:
+                                names = candidate
+                                break
+            if names is None:
+                names = [f'var_{i}' for i in range(n_vars)]
 
             if var_name in names:
                 col_idx = names.index(var_name)

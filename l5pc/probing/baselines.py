@@ -372,9 +372,15 @@ def _load_voltage_and_targets(trial_dir):
             # Load variable names if available
             from l5pc.utils.io import load_variable_names
             var_names_meta = load_variable_names(trial_dir)
-            if var_names_meta and 'level_B' in var_names_meta:
-                names = var_names_meta['level_B']
-            else:
+            names = None
+            if var_names_meta:
+                # Try keys in order of specificity
+                for mk in ['level_B_cond_keys', 'level_B_cond', 'level_B']:
+                    candidate = var_names_meta.get(mk)
+                    if isinstance(candidate, list) and len(candidate) == n_vars:
+                        names = candidate
+                        break
+            if names is None:
                 names = [f'geff_{i}' for i in range(n_vars)]
             for j, name in enumerate(names):
                 G_targets[name] = np.array([

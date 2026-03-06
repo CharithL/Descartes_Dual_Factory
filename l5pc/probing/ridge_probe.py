@@ -102,6 +102,12 @@ def ridge_cv_score(X, y, cv_folds=CV_FOLDS, alphas=None):
     if alphas is None:
         alphas = RIDGE_ALPHAS
 
+    # Check for degenerate targets (zero variance)
+    y_std = np.std(y)
+    if y_std < 1e-10:
+        logger.warning("Target has zero variance -- returning R2=0")
+        return 0.0, [0.0] * cv_folds, alphas[0]
+
     kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
     fold_r2s = []
 
@@ -110,20 +116,30 @@ def ridge_cv_score(X, y, cv_folds=CV_FOLDS, alphas=None):
         y_train, y_test = y[train_idx], y[test_idx]
 
         # StandardScaler fitted per fold to avoid leakage
-        scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train)
-        X_test = scaler.transform(X_test)
+        scaler_x = StandardScaler()
+        X_train = scaler_x.fit_transform(X_train)
+        X_test = scaler_x.transform(X_test)
+
+        # Standardize target y per fold (improves numerical stability,
+        # especially for voltage targets in [-80, +40] mV range)
+        y_mean, y_std_fold = y_train.mean(), y_train.std()
+        if y_std_fold < 1e-10:
+            fold_r2s.append(0.0)
+            continue
+        y_train_s = (y_train - y_mean) / y_std_fold
+        y_test_s = (y_test - y_mean) / y_std_fold
 
         model = RidgeCV(alphas=alphas)
-        model.fit(X_train, y_train)
-        r2 = model.score(X_test, y_test)
+        model.fit(X_train, y_train_s)
+        r2 = model.score(X_test, y_test_s)
         fold_r2s.append(float(r2))
 
     # Fit once on all data to report best alpha
     scaler_full = StandardScaler()
     X_full = scaler_full.fit_transform(X)
+    y_full_s = (y - y.mean()) / max(y.std(), 1e-10)
     model_full = RidgeCV(alphas=alphas)
-    model_full.fit(X_full, y)
+    model_full.fit(X_full, y_full_s)
 
     return float(np.mean(fold_r2s)), fold_r2s, float(model_full.alpha_)
 
@@ -380,31 +396,74 @@ def _load_targets(targets_dir, level):
     var_meta = load_variable_names(targets_dir)
 
     if arr0.ndim == 1:
-        # Single variable: (T,) per trial -> trial-mean scalar
-        var_name = key
-        if var_meta:
-            for mk in var_meta:
-                if level.upper() in mk.upper() or level.lower() in mk.lower():
-                    names = var_meta[mk]
-                    if isinstance(names, list) and len(names) == 1:
-                        var_name = names[0]
+        # 1D array: could be EITHER:
+        #   a) A time-series of length T for a single variable (Levels A/B)
+        #   b) A vector of N scalar properties (Level C emergent)
+        #
+        # Distinguish by checking: does the metadata list multiple Level C
+        # property names matching this array length?
+
+        level_c_names = None
+        if level == 'C' and var_meta:
+            # Check 'level_C_keys' (saved by run_bahl_sim) or 'level_C'
+            for mk in ['level_C_keys', 'level_C']:
+                candidate = var_meta.get(mk)
+                if (isinstance(candidate, list)
+                        and len(candidate) > 1
+                        and len(candidate) == len(arr0)):
+                    level_c_names = candidate
                     break
-        values = np.array([float(np.mean(t[key])) for t in trials])
-        return {var_name: values}
+
+        if level_c_names is not None:
+            # Level C: vector of N scalar properties per trial
+            # Each element is already a scalar -- no time-averaging needed
+            targets = {}
+            for j, name in enumerate(level_c_names):
+                values = np.array([float(t[key][j]) for t in trials])
+                targets[name] = values
+            logger.info(
+                "Level C: loaded %d emergent properties as separate targets",
+                len(targets),
+            )
+            return targets
+        else:
+            # Single time-series variable: (T,) -> trial-mean scalar
+            var_name = key
+            if var_meta:
+                for mk in var_meta:
+                    if level.upper() in mk.upper() or level.lower() in mk.lower():
+                        names = var_meta[mk]
+                        if isinstance(names, list) and len(names) == 1:
+                            var_name = names[0]
+                        break
+            values = np.array([float(np.mean(t[key])) for t in trials])
+            return {var_name: values}
 
     elif arr0.ndim == 2:
         # Multiple variables: (T, n_vars) per trial -> trial-mean per var
         n_vars = arr0.shape[1]
 
-        # Resolve variable names
+        # Resolve variable names.
+        # Prefer '_keys' metadata (matches npz column order from
+        # run_bahl_sim's sorted dict keys) over generic var_names.
         names = None
         if var_meta:
-            for mk in var_meta:
-                if level.upper() in mk.upper() or level.lower() in mk.lower():
-                    candidate = var_meta[mk]
-                    if isinstance(candidate, list) and len(candidate) == n_vars:
-                        names = candidate
-                        break
+            # Try specific key-order metadata first (matches npz column order)
+            key_suffix = key.split('_', 1)[1] if '_' in key else key
+            for mk in [f'{key}_keys', f'level_{level}_keys',
+                        key, f'level_{level}']:
+                candidate = var_meta.get(mk)
+                if isinstance(candidate, list) and len(candidate) == n_vars:
+                    names = candidate
+                    break
+            # Fallback: scan all metadata keys for a match
+            if names is None:
+                for mk in var_meta:
+                    if level.upper() in mk.upper() or level.lower() in mk.lower():
+                        candidate = var_meta[mk]
+                        if isinstance(candidate, list) and len(candidate) == n_vars:
+                            names = candidate
+                            break
         if names is None:
             names = [f'{key}_{i}' for i in range(n_vars)]
 

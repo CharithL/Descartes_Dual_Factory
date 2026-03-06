@@ -1,11 +1,14 @@
 """
-L5PC DESCARTES -- LSTM Surrogate for Spike Prediction
+L5PC DESCARTES -- LSTM Surrogate for Voltage Prediction
 
 Architecture matches the hippocampal DESCARTES experiment to enable
 cross-circuit comparison of learned representations.
 
 Input:  (batch, T, input_dim)  -- synaptic current traces per timestep
-Output: (batch, T)             -- sigmoid spike probability at each timestep
+Output: (batch, T)             -- predicted somatic voltage at each timestep
+
+The output is unbounded (no sigmoid) because the training target is raw
+somatic membrane voltage in millivolts (range ~[-80, +40] mV).
 
 Hidden states (batch, T, hidden_size) are the primary substrate for
 linear probing in the DESCARTES pipeline.
@@ -21,8 +24,7 @@ from l5pc.config import (
 
 
 class L5PC_LSTM(nn.Module):
-    """LSTM surrogate mapping synaptic inputs to instantaneous spike
-    probability.
+    """LSTM surrogate mapping synaptic inputs to somatic membrane voltage.
 
     Parameters
     ----------
@@ -77,7 +79,7 @@ class L5PC_LSTM(nn.Module):
         Returns
         -------
         output : torch.Tensor
-            Shape (batch, T) -- spike probability in [0, 1].
+            Shape (batch, T) -- predicted somatic voltage (mV, unbounded).
         hidden_states : torch.Tensor, optional
             Shape (batch, T, hidden_size) -- returned only when
             ``return_hidden=True``.
@@ -86,8 +88,8 @@ class L5PC_LSTM(nn.Module):
         lstm_out, _ = self.lstm(x)
 
         # readout: (batch, T, 1) -> squeeze -> (batch, T)
-        logits = self.readout(lstm_out).squeeze(-1)
-        output = torch.sigmoid(logits)
+        # No sigmoid -- output is raw voltage in millivolts
+        output = self.readout(lstm_out).squeeze(-1)
 
         if return_hidden:
             return output, lstm_out
