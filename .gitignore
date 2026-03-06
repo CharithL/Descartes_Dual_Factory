@@ -1,0 +1,14 @@
+data/
+*.pyc
+__pycache__/
+*.egg-info/
+.eggs/
+dist/
+build/
+*.h5
+*.pt
+x86_64/
+*.o
+*.c
+mod_func.cpp
+.ipynb_checkpoints/
