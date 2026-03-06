@@ -2,7 +2,9 @@
 L5PC DESCARTES -- Surrogate Training Loop
 
 AdamW optimiser with ReduceLROnPlateau scheduler and early stopping.
-MSE loss on firing-rate targets.
+MSE loss on somatic voltage targets (normalised to zero mean / unit std
+before computing loss, so gradient magnitudes are independent of the
+target's physical scale ~[-80, +40] mV).
 
 All hyperparameters imported from ``l5pc.config``.
 
@@ -195,6 +197,22 @@ def train_model(
     best_state = None
     patience_counter = 0
 
+    # ---- Target normalisation ----
+    # Raw voltage targets span ~[-80, +40] mV, giving initial MSE ~ 4000.
+    # Normalising to zero-mean / unit-std makes the loss O(1) and
+    # stabilises gradients for all model sizes (especially h=64/256).
+    # Compute statistics from the *training* loader targets only.
+    _all_y = []
+    for _, yb in train_loader:
+        _all_y.append(yb)
+    _all_y = torch.cat(_all_y, dim=0)
+    y_mean = _all_y.mean().item()
+    y_std = _all_y.std().item()
+    if y_std < 1e-8:
+        y_std = 1.0
+    del _all_y
+    logger.info("Target normalisation: mean=%.3f  std=%.3f", y_mean, y_std)
+
     logger.info(
         "Training on %s | %d train batches, %d val batches | max %d epochs",
         device, len(train_loader), len(val_loader), cfg["max_epochs"],
@@ -209,13 +227,19 @@ def train_model(
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
 
+            # Normalise target to zero-mean / unit-std
+            y_norm = (y_batch - y_mean) / y_std
+
             result = model(x_batch)
             # forward returns (output,) or (output, hidden)
             pred = result[0]
 
-            loss = criterion(pred, y_batch)
+            loss = criterion(pred, y_norm)
             optimiser.zero_grad()
             loss.backward()
+            # Gradient clipping: prevents exploding gradients in LSTM
+            # recurrent path, especially important for small models (h=64).
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimiser.step()
 
             train_loss_sum += loss.item() * x_batch.size(0)
@@ -232,10 +256,12 @@ def train_model(
                 x_batch = x_batch.to(device)
                 y_batch = y_batch.to(device)
 
+                y_norm = (y_batch - y_mean) / y_std
+
                 result = model(x_batch)
                 pred = result[0]
 
-                loss = criterion(pred, y_batch)
+                loss = criterion(pred, y_norm)
                 val_loss_sum += loss.item() * x_batch.size(0)
                 val_n += x_batch.size(0)
 
