@@ -479,15 +479,19 @@ def _load_target_for_test(test_data_dir, level, var_name, test_trials):
             n_vars = arr.shape[1]
             names = None
             if var_meta:
-                for mk in [f'level_{level}', f'level_{level}_keys']:
+                # Match ridge_probe._load_targets key search order:
+                # prefer '_keys' suffix (matches npz column order from
+                # run_bahl_sim's sorted dict keys).
+                for mk in [f'{data_key}_keys', f'level_{level}_keys',
+                            data_key, f'level_{level}']:
                     candidate = var_meta.get(mk)
                     if isinstance(candidate, list) and len(candidate) == n_vars:
                         names = candidate
                         break
                 if names is None:
-                    # Try alternate key patterns
+                    # Fallback: scan all metadata keys for a match
                     for mk in var_meta:
-                        if level.lower() in mk.lower():
+                        if level.upper() in mk.upper():
                             candidate = var_meta[mk]
                             if isinstance(candidate, list) and len(candidate) == n_vars:
                                 names = candidate
