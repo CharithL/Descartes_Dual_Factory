@@ -72,15 +72,18 @@ class BahlCell:
     def _try_load_model(self):
         """Try to load the full Bahl model from ModelDB files; fall back."""
         h = self.h
-        model_dir = str(BAHL_MODEL_DIR)
 
+        # First, try to load compiled mechanisms from mechanisms/ directory
+        self._load_compiled_mechanisms()
+
+        model_dir = str(BAHL_MODEL_DIR)
         loaded = False
         if os.path.isdir(model_dir):
             hoc_file = os.path.join(model_dir, 'init.hoc')
             mod_dir = os.path.join(model_dir, 'mechanisms')
             if os.path.isfile(hoc_file):
                 try:
-                    # Load compiled mechanisms
+                    # Load compiled mechanisms from model directory
                     if os.path.isdir(mod_dir):
                         h.nrn_load_dll(
                             os.path.join(mod_dir, 'nrnmech.dll')
@@ -98,6 +101,32 @@ class BahlCell:
 
         if not loaded:
             self._build_programmatic_model()
+
+    def _load_compiled_mechanisms(self):
+        """Load compiled .mod mechanisms from the project mechanisms/ dir."""
+        h = self.h
+        project_root = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)
+        )))
+        mech_dir = os.path.join(project_root, 'mechanisms')
+
+        if not os.path.isdir(mech_dir):
+            return
+
+        if os.name == 'nt':
+            dll_path = os.path.join(mech_dir, 'nrnmech.dll')
+        else:
+            dll_path = os.path.join(mech_dir, 'x86_64', '.libs',
+                                    'libnrnmech.so')
+
+        if os.path.isfile(dll_path):
+            try:
+                h.nrn_load_dll(dll_path)
+            except Exception as exc:
+                warnings.warn(
+                    f"Could not load compiled mechanisms from {dll_path}: "
+                    f"{exc}"
+                )
 
     def _build_programmatic_model(self):
         """Build a simplified ball-and-stick Bahl model from scratch.

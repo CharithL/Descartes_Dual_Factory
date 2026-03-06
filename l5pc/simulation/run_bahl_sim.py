@@ -35,6 +35,7 @@ from l5pc.config import (
     DOWNSAMPLE_FACTOR,
     T_STEPS,
     BAHL_TRIAL_DIR,
+    BAHL_REGIONS,
     STIM_CONDITIONS,
     N_BASAL_SYN,
     N_APICAL_SYN,
@@ -171,9 +172,27 @@ def run_all_trials(n_trials=None, output_dir=None, seed=42):
 
         # --- Level B: effective conductances (post-hoc from gates + gbar) ---
         gbar_dict = cell.get_gbar_values()
-        level_b_cond = compute_effective_conductances(
-            extracted, gbar_dict, var_names
+
+        # Build flat gates dict: 'm_NaTa_t_soma' -> array
+        flat_gates = {}
+        for _region in BAHL_REGIONS:
+            if _region not in extracted:
+                continue
+            for _chan, _gate_dict in extracted[_region].get('gates', {}).items():
+                for _gate_name, _gate_arr in _gate_dict.items():
+                    flat_gates[f'{_gate_name}_{_chan}_{_region}'] = _gate_arr
+
+        level_b_cond_dict = compute_effective_conductances(
+            flat_gates, gbar_dict
         )
+        # Convert dict -> 2D array (T, N_conductances)
+        if level_b_cond_dict:
+            cond_keys = sorted(level_b_cond_dict.keys())
+            level_b_cond = np.column_stack(
+                [level_b_cond_dict[k] for k in cond_keys]
+            )
+        else:
+            level_b_cond = np.empty((T_STEPS, 0), dtype=np.float32)
         level_b_cond = _pad_or_trim(level_b_cond, T_STEPS)
 
         # --- Level B: ionic currents ---
@@ -181,13 +200,42 @@ def run_all_trials(n_trials=None, output_dir=None, seed=42):
         level_b_curr = _pad_or_trim(level_b_curr, T_STEPS)
 
         # --- Level C: emergent properties (post-hoc) ---
-        level_c = compute_emergent_properties(
-            extracted, dt_ms=RECORDING_DT_MS
+        # Build flat recordings dict for compute_emergent_properties
+        emerge_rec = {}
+        if 'soma' in extracted and 'v' in extracted['soma']:
+            emerge_rec['V_soma'] = extracted['soma']['v']
+        if 'tuft' in extracted and 'v' in extracted['tuft']:
+            emerge_rec['V_tuft'] = extracted['tuft']['v']
+        if 'nexus' in extracted and 'v' in extracted['nexus']:
+            emerge_rec['V_nexus'] = extracted['nexus']['v']
+        if 'nexus' in extracted:
+            cai = extracted['nexus'].get('cai')
+            if cai is not None:
+                emerge_rec['cai_nexus'] = cai
+        if 'tuft' in extracted:
+            cai = extracted['tuft'].get('cai')
+            if cai is not None:
+                emerge_rec['cai_tuft'] = cai
+        if 'soma' in extracted:
+            for _cn, _ca in extracted['soma'].get('currents', {}).items():
+                if _cn == 'ina':
+                    emerge_rec['I_NaTa_t_soma'] = _ca
+
+        level_c_dict = compute_emergent_properties(
+            emerge_rec, dt_ms=RECORDING_DT_MS
+        )
+        # Convert dict of scalars -> 1D array for npz storage
+        level_c_keys = sorted(level_c_dict.keys())
+        level_c = np.array(
+            [float(level_c_dict[k]) for k in level_c_keys],
+            dtype=np.float32
         )
 
         # --- 2g. Save trial ---
         metadata = {
             **var_names,
+            'level_B_cond_keys': cond_keys if level_b_cond_dict else [],
+            'level_C_keys': level_c_keys,
             'condition_labels': {
                 trial_idx: condition
             },
