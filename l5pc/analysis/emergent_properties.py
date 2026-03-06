@@ -371,10 +371,10 @@ def patch_level_c_from_saved_data(trial_dir=None):
             new_props['bac_detected'] = 1.0 if (dend_ca_amp > -20.0 and n_spikes > 0) else 0.0
         else:
             new_props['bac_detected'] = 0.0
-        # n_dendritic_Ca_spikes can only be computed from raw V_dend
-        # traces, which aren't saved. Set to -1 to indicate "unavailable"
-        # (will be computed correctly on next re-simulation).
-        new_props['n_dendritic_Ca_spikes'] = -1
+        # n_dendritic_Ca_spikes requires raw V_dend traces which aren't
+        # saved in trial files.  Omit from patched data to avoid a
+        # constant-value column that triggers zero-variance warnings.
+        # It will be computed correctly on next re-simulation.
 
         # Merge: keep all existing properties, add/overwrite new ones
         merged = {}

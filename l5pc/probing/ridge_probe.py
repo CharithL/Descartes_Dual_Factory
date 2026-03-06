@@ -80,7 +80,7 @@ def preprocess(X, method):
 # Ridge cross-validation
 # ---------------------------------------------------------------------------
 
-def ridge_cv_score(X, y, cv_folds=CV_FOLDS, alphas=None):
+def ridge_cv_score(X, y, cv_folds=CV_FOLDS, alphas=None, target_name=None):
     """Fit RidgeCV with trial-level cross-validation.
 
     Parameters
@@ -89,6 +89,8 @@ def ridge_cv_score(X, y, cv_folds=CV_FOLDS, alphas=None):
     y : ndarray, shape (n_trials,)
     cv_folds : int
     alphas : list of float, optional
+    target_name : str, optional
+        Name of the target variable (for diagnostic logging).
 
     Returns
     -------
@@ -105,7 +107,9 @@ def ridge_cv_score(X, y, cv_folds=CV_FOLDS, alphas=None):
     # Check for degenerate targets (zero variance)
     y_std = np.std(y)
     if y_std < 1e-10:
-        logger.warning("Target has zero variance -- returning R2=0")
+        label = target_name or "unknown"
+        logger.warning("Target '%s' has zero variance (std=%.2e) -- returning R2=0",
+                       label, y_std)
         return 0.0, [0.0] * cv_folds, alphas[0]
 
     kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
@@ -231,10 +235,12 @@ def probe_single_variable(trained_H, untrained_H, target_y, var_name,
 
         r2_tr, folds_tr, alpha_tr = ridge_cv_score(X_tr, target_y,
                                                     cv_folds=cv_folds,
-                                                    alphas=alphas)
+                                                    alphas=alphas,
+                                                    target_name=var_name)
         r2_un, folds_un, alpha_un = ridge_cv_score(X_un, target_y,
                                                     cv_folds=cv_folds,
-                                                    alphas=alphas)
+                                                    alphas=alphas,
+                                                    target_name=var_name)
 
         all_prep_results[prep] = {
             'R2_trained': r2_tr,
