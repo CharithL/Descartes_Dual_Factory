@@ -314,6 +314,10 @@ def run_all_ablations(ridge_results_dir, hidden_dir, model_dir,
     test_inputs_np = np.stack([t['inputs'] for t in test_trials])
     test_outputs_np = np.stack([t['output'] for t in test_trials])
 
+    # Use GPU if available
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    logger.info("Ablation device: %s", device)
+
     all_results = {}
 
     for hs in HIDDEN_SIZES:
@@ -327,9 +331,10 @@ def run_all_ablations(ridge_results_dir, hidden_dir, model_dir,
 
         from l5pc.surrogates.lstm import L5PC_LSTM
         model = L5PC_LSTM(hidden_size=hs)
-        state_dict = torch.load(model_path, map_location='cpu',
+        state_dict = torch.load(model_path, map_location=device,
                                 weights_only=True)
         model.load_state_dict(state_dict)
+        model.to(device)
         _set_model_eval(model)
 
         # Load hidden states via shared loader (handles .npz and trial-averaging)
