@@ -189,7 +189,6 @@ def train_model(
         mode="min",
         patience=cfg["lr_patience"],
         factor=cfg["lr_factor"],
-        verbose=False,
     )
 
     best_val_loss = float("inf")
