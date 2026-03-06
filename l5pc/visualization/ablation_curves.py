@@ -73,17 +73,36 @@ def plot_ablation_curve(ablation_results, var_name, save_path=None):
 
 
 def plot_all_ablations(ablation_path, save_dir=None):
-    """Plot ablation curves for all tested variables."""
+    """Plot ablation curves for all tested variables.
+
+    Handles the wrapped format from run_all_ablations():
+        {"n_ablated": ..., "results": {key: {ablation_steps: [...], ...}}}
+    """
     with open(ablation_path) as f:
-        all_results = json.load(f)
+        raw = json.load(f)
+
+    # Extract the results dict (skip n_ablated, n_causal, etc.)
+    if isinstance(raw, dict) and 'results' in raw:
+        all_results = raw['results']
+    else:
+        all_results = raw
 
     if save_dir:
         save_dir = Path(save_dir)
         save_dir.mkdir(parents=True, exist_ok=True)
 
-    for var_name, results in all_results.items():
-        save_path = save_dir / f'ablation_{var_name}.png' if save_dir else None
-        plot_ablation_curve(results, var_name, save_path)
+    for key, entry in all_results.items():
+        # Each entry: {var_name, level, hidden_size, ablation_steps, ...}
+        if not isinstance(entry, dict):
+            continue
+        ablation_steps = entry.get('ablation_steps', [])
+        if not ablation_steps:
+            continue
+        var_name = entry.get('var_name', key)
+        hs = entry.get('hidden_size', '?')
+        display_name = f"{var_name} (h={hs})"
+        save_path = save_dir / f'ablation_{key}.png' if save_dir else None
+        plot_ablation_curve(ablation_steps, display_name, save_path)
 
 
 def plot_mandatory_summary(classification_path, save_path=None):
@@ -93,20 +112,52 @@ def plot_mandatory_summary(classification_path, save_path=None):
     - Red: Concentrated (breaks < 10%)
     - Orange: Distributed (breaks 40-60%)
     - Yellow: Redundant (breaks > 70%)
+
+    Handles the classification JSON format from classify_all():
+        {total_variables, category_counts, per_level, per_hidden_size,
+         classifications: [{final_category, evidence: {breaking_point, ...}, ...}]}
+    Also accepts ablation JSON format from run_all_ablations():
+        {results: {key: {classification, breaking_point, ...}}}
     """
     with open(classification_path) as f:
-        classifications = json.load(f)
+        raw = json.load(f)
 
-    mandatory = {k: v for k, v in classifications.items()
-                 if v.get('category', '').startswith('MANDATORY')}
+    # Extract mandatory entries from whichever JSON format we received
+    mandatory_entries = []
 
-    if not mandatory:
+    if 'classifications' in raw:
+        # Classification summary format (from classify_all)
+        for entry in raw['classifications']:
+            cat = entry.get('final_category', '')
+            if cat.startswith('MANDATORY'):
+                evidence = entry.get('evidence', {})
+                mandatory_entries.append({
+                    'name': f"{entry.get('var_name', '?')} (h={entry.get('hidden_size', '?')})",
+                    'breaking_point': evidence.get('breaking_point', 0.5),
+                    'category': cat,
+                })
+    elif 'results' in raw:
+        # Ablation results format (from run_all_ablations)
+        results = raw['results']
+        if isinstance(results, dict):
+            for key, entry in results.items():
+                if not isinstance(entry, dict):
+                    continue
+                cat = entry.get('classification', '')
+                if cat.startswith('MANDATORY'):
+                    mandatory_entries.append({
+                        'name': f"{entry.get('var_name', key)} (h={entry.get('hidden_size', '?')})",
+                        'breaking_point': entry.get('breaking_point', 0.5),
+                        'category': cat,
+                    })
+
+    if not mandatory_entries:
         print("No mandatory variables found.")
         return
 
-    names = list(mandatory.keys())
-    breaking_points = [v.get('breaking_k_frac', 0.5) for v in mandatory.values()]
-    categories = [v.get('category', '') for v in mandatory.values()]
+    names = [e['name'] for e in mandatory_entries]
+    breaking_points = [e['breaking_point'] or 0.5 for e in mandatory_entries]
+    categories = [e['category'] for e in mandatory_entries]
 
     color_map = {
         'MANDATORY_CONCENTRATED': '#e74c3c',
@@ -119,7 +170,7 @@ def plot_mandatory_summary(classification_path, save_path=None):
     bars = ax.barh(range(len(names)), breaking_points, color=colors,
                    edgecolor='black', linewidth=0.5)
     ax.set_yticks(range(len(names)))
-    ax.set_yticklabels(names)
+    ax.set_yticklabels(names, fontsize=8)
     ax.set_xlabel('Breaking point (fraction of dims clamped)')
     ax.set_title('Mandatory Variables by Redundancy Type')
 

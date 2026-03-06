@@ -241,7 +241,12 @@ def run_step_8_visualize(force=False):
     ablation_path = RESULTS_DIR / 'ablation_results.json'
     if ablation_path.exists():
         plot_all_ablations(str(ablation_path), save_dir=str(fig_dir))
-        plot_mandatory_summary(str(ablation_path), save_path=str(fig_dir / 'mandatory_summary.png'))
+
+    # Mandatory variable summary (prefer classification file, fall back to ablation)
+    classification_path = RESULTS_DIR / 'classification_summary.json'
+    summary_source = classification_path if classification_path.exists() else ablation_path
+    if summary_source.exists():
+        plot_mandatory_summary(str(summary_source), save_path=str(fig_dir / 'mandatory_summary.png'))
 
     print(f"  DONE: Figures saved to {fig_dir}")
 
