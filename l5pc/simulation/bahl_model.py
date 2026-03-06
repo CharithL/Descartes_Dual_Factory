@@ -53,6 +53,9 @@ class BahlCell:
         All synapse / NetCon / NetStim objects (prevents garbage collection).
     """
 
+    # Class-level flag: mechanisms only need to be loaded once per process
+    _mechanisms_loaded = False
+
     def __init__(self):
         from neuron import h, nrn  # noqa: delayed import
         self.h = h
@@ -113,7 +116,13 @@ class BahlCell:
           - x86_64/.libs/libnrnmech.so  (NEURON <= 8.0)
           - x86_64/libnrnmech.so        (NEURON 8.1+)
           - nrnmech.dll                  (Windows)
+
+        Only loads once per process (tracked via class-level flag).
         """
+        # Skip if already loaded in this NEURON process
+        if BahlCell._mechanisms_loaded:
+            return
+
         h = self.h
         project_root = os.path.dirname(os.path.dirname(os.path.dirname(
             os.path.abspath(__file__)
@@ -143,35 +152,25 @@ class BahlCell:
                 recursive=True
             )
 
-        loaded = False
         for dll_path in candidates:
             if os.path.isfile(dll_path):
                 try:
                     h.nrn_load_dll(dll_path)
                     print(f"[BahlCell] Loaded mechanisms from: {dll_path}")
-                    loaded = True
-                    break
+                    BahlCell._mechanisms_loaded = True
+                    return
                 except Exception as exc:
+                    # "already exists" means mechanisms were loaded by a
+                    # previous nrn_load_dll call (e.g. via nrnivmodl -loadflags)
+                    if 'already exists' in str(exc):
+                        BahlCell._mechanisms_loaded = True
+                        return
                     print(f"[BahlCell] Failed to load {dll_path}: {exc}")
 
-        if not loaded:
-            print(f"[BahlCell] WARNING: No compiled mechanisms found!")
-            print(f"[BahlCell]   Searched in: {mech_dir}")
-            print(f"[BahlCell]   Candidates tried: {candidates}")
-            print(f"[BahlCell]   Run: cd mechanisms && nrnivmodl . && cd ..")
-            # List what's actually in the directory for debugging
-            if os.path.isdir(mech_dir):
-                contents = os.listdir(mech_dir)
-                print(f"[BahlCell]   Directory contents: {contents}")
-                x86_dir = os.path.join(mech_dir, 'x86_64')
-                if os.path.isdir(x86_dir):
-                    x86_contents = []
-                    for root, dirs, files in os.walk(x86_dir):
-                        for f in files:
-                            x86_contents.append(
-                                os.path.relpath(os.path.join(root, f), mech_dir)
-                            )
-                    print(f"[BahlCell]   x86_64 contents: {x86_contents}")
+        # Nothing loaded — print diagnostic info
+        print(f"[BahlCell] WARNING: No compiled mechanisms found!")
+        print(f"[BahlCell]   Searched in: {mech_dir}")
+        print(f"[BahlCell]   Run: cd mechanisms && nrnivmodl . && cd ..")
 
     def _build_programmatic_model(self):
         """Build a simplified ball-and-stick Bahl model from scratch.
@@ -292,6 +291,9 @@ class BahlCell:
         # ---- Collect gbar values ----
         self._collect_gbar_values()
 
+    # Class-level: only print verification once
+    _verified_once = False
+
     def _verify_mechanisms(self):
         """Check that critical active mechanisms are present in the cell."""
         if 'soma' not in self.sections:
@@ -302,22 +304,18 @@ class BahlCell:
         seg = soma(0.5)
 
         critical = ['NaTa_t', 'SKv3_1', 'K_Pst']
-        missing = []
-        present = []
-        for mech_name in critical:
-            if hasattr(seg, mech_name):
-                present.append(mech_name)
-            else:
-                missing.append(mech_name)
+        missing = [m for m in critical if not hasattr(seg, m)]
 
         if missing:
+            present = [m for m in critical if hasattr(seg, m)]
             print(f"[BahlCell] CRITICAL: Missing mechanisms in soma: {missing}")
             print(f"[BahlCell]   Present: {present}")
             print(f"[BahlCell]   The cell will be PASSIVE ONLY (no spikes).")
             print(f"[BahlCell]   Fix: cd mechanisms && nrnivmodl . && cd ..")
-        else:
-            print(f"[BahlCell] OK: Active mechanisms verified ({len(present)} "
-                  f"critical channels present in soma)")
+        elif not BahlCell._verified_once:
+            print(f"[BahlCell] OK: All {len(critical)} critical channels "
+                  f"present in soma")
+            BahlCell._verified_once = True
 
     def _collect_gbar_values(self):
         """Scan every section and build the gbar_values dict."""
