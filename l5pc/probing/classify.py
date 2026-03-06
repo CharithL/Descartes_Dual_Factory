@@ -351,7 +351,7 @@ def print_classification_summary(results):
                 if c.startswith('MANDATORY')
             )
             n_zombie = cats.get('ZOMBIE', 0)
-            print(f"    h={hs:>3s}:  {hsdata['total']:3d} vars  "
+            print(f"    h={str(hs):>3s}:  {hsdata['total']:3d} vars  "
                   f"| {n_zombie:3d} zombie  | {n_mandatory:3d} mandatory")
         print()
 
