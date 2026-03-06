@@ -35,7 +35,7 @@ def step_complete(step_name, output_dir):
     checks = {
         'simulate': BAHL_TRIAL_DIR / 'trial_000.npz',
         'train': SURROGATE_DIR / f'lstm_h{HIDDEN_SIZES[-1]}_best.pt',
-        'extract': SURROGATE_DIR / f'hidden_h{HIDDEN_SIZES[0]}_trained.npy',
+        'extract': SURROGATE_DIR / 'hidden' / f'lstm_{HIDDEN_SIZES[0]}_trained.npz',
         'probe': RESULTS_DIR / f'ridge_levelB_h{HIDDEN_SIZES[0]}.json',
         'baselines': RESULTS_DIR / 'voltage_baselines.json',
         'ablation': RESULTS_DIR / 'ablation_results.json',
@@ -121,9 +121,8 @@ def run_step_3_extract(force=False):
 
     from l5pc.surrogates.extract_hidden import extract_all
     extract_all(
-        trial_dir=str(BAHL_TRIAL_DIR),
-        model_dir=str(SURROGATE_DIR),
-        save_dir=str(SURROGATE_DIR)
+        data_dir=str(BAHL_TRIAL_DIR),
+        surrogate_dir=str(SURROGATE_DIR),
     )
     print("  DONE: Hidden states extracted.")
 
@@ -180,10 +179,10 @@ def run_step_6_ablation(force=False):
 
     from l5pc.probing.ablation import run_all_ablations
     run_all_ablations(
-        model_dir=str(SURROGATE_DIR),
-        trial_dir=str(BAHL_TRIAL_DIR),
-        ridge_dir=str(RESULTS_DIR),
+        ridge_results_dir=str(RESULTS_DIR),
         hidden_dir=str(SURROGATE_DIR),
+        model_dir=str(SURROGATE_DIR),
+        test_data_dir=str(BAHL_TRIAL_DIR),
         save_path=str(RESULTS_DIR / 'ablation_results.json')
     )
     print("  DONE: Causal ablation complete.")

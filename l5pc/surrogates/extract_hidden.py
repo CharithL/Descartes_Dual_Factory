@@ -205,10 +205,13 @@ def extract_all(
 
     # --- LSTMs ---
     for h in HIDDEN_SIZES:
-        model_path = surrogate_dir / f"lstm_{h}.pt"
+        # Try both naming conventions from training
+        model_path = surrogate_dir / f"lstm_h{h}_best.pt"
+        if not model_path.exists():
+            model_path = surrogate_dir / f"lstm_{h}.pt"
         if not model_path.exists():
             logger.warning(
-                "Checkpoint not found: %s -- skipping LSTM h=%d", model_path, h
+                "Checkpoint not found for LSTM h=%d -- skipping", h
             )
             continue
 
