@@ -1,0 +1,17 @@
+# Windows requirements for L5PC DESCARTES
+# NEURON must be installed separately via conda:
+#   conda install -c conda-forge neuron
+#
+# Install these with:
+#   pip install -r requirements-windows.txt
+
+torch>=2.0
+tensorflow>=2.13
+scikit-learn>=1.3
+numpy>=1.24
+scipy>=1.11
+matplotlib>=3.7
+seaborn>=0.12
+h5py>=3.9
+antropy>=0.1.6
+# netpyne>=1.0  # Optional: only needed for Phase 3 circuit integration
