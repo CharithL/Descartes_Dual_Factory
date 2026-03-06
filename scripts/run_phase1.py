@@ -85,9 +85,9 @@ def run_step_2_train(force=False):
             continue
         print(f"\n  Training LSTM h={h}...")
         train_lstm(
-            trial_dir=str(BAHL_TRIAL_DIR),
+            data_dir=str(BAHL_TRIAL_DIR),
             hidden_size=h,
-            save_dir=str(SURROGATE_DIR)
+            save_path=str(model_path)
         )
     print("  DONE: All LSTM models trained.")
 

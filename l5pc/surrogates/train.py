@@ -86,8 +86,27 @@ def create_dataset(
         Contains (inputs, outputs) tensors as float32.
     """
     trial_dir = Path(trial_dir)
-    inputs = np.load(trial_dir / "inputs.npy")    # (N, T, C)
-    outputs = np.load(trial_dir / "outputs.npy")   # (N, T)
+
+    # Try aggregated .npy files first, fall back to per-trial .npz
+    if (trial_dir / "inputs.npy").exists():
+        inputs = np.load(trial_dir / "inputs.npy")    # (N, T, C)
+        outputs = np.load(trial_dir / "outputs.npy")   # (N, T)
+    else:
+        # Load individual trial_XXX.npz files (from simulation output)
+        trial_files = sorted(trial_dir.glob("trial_*.npz"))
+        if not trial_files:
+            raise FileNotFoundError(
+                f"No trial data in {trial_dir}. "
+                "Expected inputs.npy/outputs.npy or trial_XXX.npz files."
+            )
+        input_list, output_list = [], []
+        for fpath in trial_files:
+            data = np.load(fpath)
+            input_list.append(data['inputs'])    # (T, C)
+            output_list.append(data['output'])   # (T,)
+        inputs = np.stack(input_list, axis=0)    # (N, T, C)
+        outputs = np.stack(output_list, axis=0)  # (N, T)
+        logger.info("Loaded %d trials from individual .npz files", len(inputs))
 
     if split == "train":
         start, end = 0, TRAIN_SPLIT
