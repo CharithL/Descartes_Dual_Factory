@@ -58,7 +58,23 @@ def run_step_1_simulate(force=False):
         print("  SKIP: Simulation data already exists.")
         return
 
-    from l5pc.simulation.run_bahl_sim import run_all_trials
+    try:
+        from l5pc.simulation.run_bahl_sim import run_all_trials
+    except ModuleNotFoundError as e:
+        if 'neuron' in str(e).lower():
+            print("  ERROR: NEURON simulator not installed.")
+            print("         Step 1 requires NEURON which is Linux/conda-only.")
+            print("")
+            print("  Options:")
+            print("    1. Run Step 1 on Vast.ai / Linux, then copy data here")
+            print("    2. Install via conda: conda install -c conda-forge neuron")
+            print("    3. Use WSL2:  wsl pip install neuron")
+            print("")
+            print("  To skip Step 1 and run training on existing data:")
+            print("    python scripts/run_phase1.py --start-step 2")
+            return
+        raise
+
     run_all_trials(
         n_trials=N_TRIALS,
         output_dir=str(BAHL_TRIAL_DIR),
