@@ -24,6 +24,9 @@ from sklearn.linear_model import RidgeCV
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import StandardScaler
 
+from sklearn.linear_model import LogisticRegressionCV
+from sklearn.metrics import roc_auc_score
+
 from l5pc.config import (
     ABLATION_K_FRACTIONS,
     CV_FOLDS,
@@ -281,6 +284,163 @@ def probe_single_variable(trained_H, untrained_H, target_y, var_name,
         'best_preprocessing': best_prep,
         'p_value': float(p_value),
         'category': category,
+        'all_preprocessing_results': all_prep_results,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Logistic probing for binary targets (Priority 2: BAC detection fix)
+# ---------------------------------------------------------------------------
+
+def logistic_cv_auc(X, y, cv_folds=CV_FOLDS):
+    """Logistic regression with AUC-ROC for binary targets.
+
+    Replaces Ridge R² for binary variables (bac_detected, etc.) where
+    linear regression produces nonsensical scores.
+
+    Parameters
+    ----------
+    X : ndarray, shape (n_trials, n_features)
+    y : ndarray, shape (n_trials,)
+        Binary labels (0 or 1).
+    cv_folds : int
+
+    Returns
+    -------
+    mean_auc : float
+        Mean AUC-ROC across CV folds.
+    fold_aucs : list of float
+    n_positive : int
+        Number of positive (=1) samples in y.
+    """
+    n_positive = int(np.sum(y == 1))
+    n_negative = int(np.sum(y == 0))
+
+    # Need at least a few positives per fold for meaningful AUC
+    min_per_class = max(2, cv_folds)
+    if n_positive < min_per_class or n_negative < min_per_class:
+        logger.warning(
+            "Too few samples for logistic CV: %d positive, %d negative "
+            "(need >= %d each). Returning AUC=0.5 (chance)",
+            n_positive, n_negative, min_per_class,
+        )
+        return 0.5, [0.5] * cv_folds, n_positive
+
+    kf = KFold(n_splits=cv_folds, shuffle=True, random_state=42)
+    fold_aucs = []
+
+    for train_idx, test_idx in kf.split(X):
+        X_train, X_test = X[train_idx], X[test_idx]
+        y_train, y_test = y[train_idx], y[test_idx]
+
+        # Skip folds where test set has only one class
+        if len(np.unique(y_test)) < 2:
+            continue
+
+        scaler = StandardScaler()
+        X_train = scaler.fit_transform(X_train)
+        X_test = scaler.transform(X_test)
+
+        clf = LogisticRegressionCV(
+            Cs=10, cv=3, solver='lbfgs',
+            max_iter=1000, random_state=42,
+            l1_ratios=(0,),
+        )
+        clf.fit(X_train, y_train)
+
+        y_prob = clf.predict_proba(X_test)[:, 1]
+        auc = roc_auc_score(y_test, y_prob)
+        fold_aucs.append(float(auc))
+
+    if not fold_aucs:
+        return 0.5, [], n_positive
+
+    return float(np.mean(fold_aucs)), fold_aucs, n_positive
+
+
+def probe_binary_variable(trained_H, untrained_H, target_y, var_name,
+                          preprocessing_options=None, cv_folds=CV_FOLDS):
+    """Probe a binary target variable using logistic regression + AUC-ROC.
+
+    Parameters
+    ----------
+    trained_H : ndarray, (n_trials, hidden_size)
+    untrained_H : ndarray, (n_trials, hidden_size)
+    target_y : ndarray, (n_trials,) — binary 0/1
+    var_name : str
+    preprocessing_options : list of str, optional
+    cv_folds : int
+
+    Returns
+    -------
+    result : dict
+        Keys: var_name, AUC_trained, AUC_untrained, delta_AUC,
+        n_positive, n_negative, best_preprocessing, recommendation.
+    """
+    if preprocessing_options is None:
+        preprocessing_options = PREPROCESSING_OPTIONS
+
+    n_positive = int(np.sum(target_y == 1))
+    n_negative = int(np.sum(target_y == 0))
+
+    best_auc_trained = 0.5
+    best_auc_untrained = 0.5
+    best_prep = None
+    all_prep_results = {}
+
+    for prep in preprocessing_options:
+        try:
+            X_tr = preprocess(trained_H, prep)
+            X_un = preprocess(untrained_H, prep)
+        except Exception as e:
+            logger.warning("Preprocessing '%s' failed for %s: %s",
+                           prep, var_name, e)
+            continue
+
+        auc_tr, folds_tr, _ = logistic_cv_auc(X_tr, target_y, cv_folds)
+        auc_un, folds_un, _ = logistic_cv_auc(X_un, target_y, cv_folds)
+
+        all_prep_results[prep] = {
+            'AUC_trained': auc_tr,
+            'AUC_untrained': auc_un,
+            'delta_AUC': auc_tr - auc_un,
+            'fold_AUCs_trained': folds_tr,
+            'fold_AUCs_untrained': folds_un,
+        }
+
+        if auc_tr > best_auc_trained:
+            best_auc_trained = auc_tr
+            best_auc_untrained = auc_un
+            best_prep = prep
+
+    delta_auc = best_auc_trained - best_auc_untrained
+
+    # Recommendation
+    recommendation = None
+    if n_positive < 20:
+        recommendation = (
+            f"Only {n_positive} BAC events detected. Consider adding "
+            f"BAC-specific simulation trials (e.g., coincident apical+basal "
+            f"stimulation) to improve statistical power."
+        )
+
+    logger.info(
+        "  %s: AUC_tr=%.3f  AUC_un=%.3f  dAUC=%.3f  "
+        "n_pos=%d  n_neg=%d  [%s]",
+        var_name, best_auc_trained, best_auc_untrained, delta_auc,
+        n_positive, n_negative, best_prep or 'N/A',
+    )
+
+    return {
+        'var_name': var_name,
+        'metric': 'AUC-ROC',
+        'AUC_trained': float(best_auc_trained),
+        'AUC_untrained': float(best_auc_untrained),
+        'delta_AUC': float(delta_auc),
+        'n_positive': n_positive,
+        'n_negative': n_negative,
+        'best_preprocessing': best_prep,
+        'recommendation': recommendation,
         'all_preprocessing_results': all_prep_results,
     }
 
