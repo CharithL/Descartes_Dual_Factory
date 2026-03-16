@@ -1,0 +1,15 @@
+# DESCARTES Dual Factory v3.0 — Optional Dependencies
+# Core deps (torch, scikit-learn, scipy, numpy) assumed installed
+
+# Tier 3: Dynamical probes
+pysindy>=2.0
+
+# Tier 4: Topological probes
+ripser>=0.6
+persim>=0.3
+
+# Tier 2: Joint alignment (optional)
+cebra>=0.4
+
+# LLM balloon expansion
+anthropic>=0.40
