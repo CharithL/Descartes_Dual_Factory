@@ -1,255 +1,144 @@
-# L5PC DESCARTES: Zombie Test for Neural Surrogates
+# DESCARTES Dual Factory v3.0
 
-**Do neural surrogates encode biological intermediates, or solve via alien computation?**
+**Determining whether neural network surrogates are computational zombies or genuine mechanistic equivalents of biological circuits.**
 
-This repository implements the DESCARTES (Detailed Evaluation of Surrogate Computation Against Real Targets and Encoded States) framework for testing whether LSTM surrogates of layer-5 pyramidal cells (L5PCs) represent biologically meaningful intermediate variables or function as "zombies" that bypass real biophysics.
+Part of the ARIA COGITO Programme.
+
+---
 
 ## The Zombie Test
 
-A surrogate is a **zombie** if it achieves accurate input-output mapping without internally representing the biological variables (ion channel gates, effective conductances, dendritic calcium) that the real neuron computes. DESCARTES distinguishes four variable categories:
+A surrogate is a **zombie** if it achieves accurate input-output mapping without internally representing the biological variables (ion channel gates, effective conductances, dendritic calcium) that the real neuron computes.
 
-| Category | Meaning | Detection |
-|----------|---------|-----------|
-| **ZOMBIE** | Not represented beyond chance | dR2 < 0.1 |
-| **VOLTAGE RE-ENCODING** | Decodable, but only via voltage | R2 does not exceed voltage baseline |
-| **LEARNED BYPRODUCT** | Represented but not causally used | Passes probing but fails ablation |
-| **MANDATORY** | Causally required for computation | Target-correlated clamping breaks output (z < -2) |
+The Dual Factory v3.0 extends the original DESCARTES pipeline with 43 probe methods, 13-method statistical hardening, SAE superposition analysis, genome-based surrogate evolution, and LLM-assisted architecture search.
 
-Only **MANDATORY** variables confirm genuine biological representation.
+## Architecture
 
-## Three-Phase Pipeline
+The Dual Factory co-evolves two search loops:
 
-### Phase 1: Bahl Reduced Model (6-compartment L5PC)
-The primary validation pipeline with 8 automated steps:
+- **C1 Probing Factory** (inner loop) — 43 probe methods across 7 tiers evaluate whether a surrogate genuinely encodes biological variables or merely memorises input-output mappings.
+- **C2 Surrogate Factory** (outer loop) — genome-based architecture search over 13 surrogate types, guided by Thompson sampling, DreamCoder pattern synthesis, and LLM balloon expansion.
 
+The probing factory is the fitness evaluator for the surrogate factory. Together they produce a formal zombie verdict for every surrogate architecture.
+
+## Implementation Phases
+
+| Phase | Status | Description | README |
+|-------|--------|-------------|--------|
+| 1 | **Complete** | Registry, MLP probe, SAE, Statistical Hardening | [Phase 1](docs/phase1_README.md) |
+| 2 | Planned | Joint Alignment, Causal, Dynamical Probes | [Phase 2](docs/phase2_README.md) |
+| 3 | Planned | Topological, Information-Theoretic, Temporal Probes | [Phase 3](docs/phase3_README.md) |
+| 4 | Planned | Factory Package (Genomes, Trainer, Verdict, LLM, DreamCoder, Orchestrator) | [Phase 4](docs/phase4_README.md) |
+| 5 | Planned | Integration, __init__ updates, Full Smoke Tests | [Phase 5](docs/phase5_README.md) |
+
+## Quick Start
+
+```bash
+# Core dependencies (required)
+pip install torch scikit-learn scipy numpy
+
+# Optional dependencies (for full probe suite)
+pip install -r requirements-v3.txt
 ```
-Step 1  Simulate       500 Bahl L5PC trials (NEURON + BBP ion channels)
-Step 2  Train          LSTM surrogates (h=64, 128, 256)
-Step 3  Extract        Hidden states (trained + untrained baselines)
-Step 4  Probe          3-level Ridge dR2 probing
-Step 5  Baselines      Voltage-only controls
-Step 6  Ablation       Progressive clamping (causal test)
-Step 7  Classify       Final variable categorisation
-Step 8  Visualise      Tables, bar charts, ablation curves
+
+```python
+# Check which probes are available
+from l5pc.probing.registry import AVAILABLE_PROBES, get_available_probe_names
+print(get_available_probe_names())
+
+# Run hardened probe on a single target
+from l5pc.probing.hardening import hardened_probe
+result = hardened_probe(h_trained, h_untrained, target, 'gNaTa_t')
+print(result['hardened_verdict'])  # e.g. 'CONFIRMED_ZOMBIE'
+
+# MLP nonlinear probing control
+from l5pc.probing.mlp_probe import mlp_delta_r2
+results = mlp_delta_r2(h_trained, h_untrained, targets, target_names)
+
+# SAE superposition detection
+from l5pc.probing.sae_probe import train_sae, sae_probe_biological_variables
+sae, loss = train_sae(hidden_states, input_dim=128, expansion_factor=4)
+sae_results = sae_probe_biological_variables(sae, hidden_states, bio_targets, names)
 ```
 
-### Phase 2: Hay Detailed Model (639-compartment L5PC)
-Scales the analysis to a biophysically detailed morphology with 2000 trials.
+## Zombie Verdict Types
 
-### Phase 3: Circuit Integration
-Tests whether surrogate-replaced cells preserve network-level dynamics (gamma oscillations, burst propagation) in a cortical microcircuit.
-
-## Three Probing Levels
-
-| Level | Variables | Expected Result |
-|-------|-----------|-----------------|
-| **A** | Individual gate variables (m, h per channel per compartment) | Mostly zombie (high-dimensional, redundant) |
-| **B** | Effective conductances G_eff = gbar * prod(gate^exp) | Key test: should find mandatory variables like g_NaTs2t |
-| **C** | Emergent properties (spike count, burst ratio, BAC flag, Ca integral) | Some mandatory, some byproduct |
+| Verdict | Meaning |
+|---------|---------|
+| `CONFIRMED_ZOMBIE` | TOST + Bayes factor confirm no encoding |
+| `LIKELY_ZOMBIE` | Not significant, but insufficient evidence for formal confirmation |
+| `SPURIOUS_DRIFT` | R2 driven entirely by ultra-slow (<1 Hz) drift |
+| `NONLINEAR_ENCODED` | MLP catches encoding that Ridge misses |
+| `SUPERPOSED_NON_ZOMBIE` | SAE decomposes entangled encoding invisible to raw Ridge |
+| `SUSPICIOUS_AUTOCORRELATION` | Durbin-Watson < 1.0 with weak delta-R2 |
+| `CANDIDATE_ENCODED` | Significant but moderate delta-R2 |
+| `CONFIRMED_ENCODED` | delta-R2 > 0.2 with formal significance |
+| `MANDATORY` | Causal ablation confirms necessity |
 
 ## Project Structure
 
 ```
-L5PC/
-|-- l5pc/                          # Core library
-|   |-- config.py                  # All hyperparameters and paths
-|   |-- simulation/
-|   |   |-- bahl_model.py          # 6-compartment Bahl L5PC (NEURON)
-|   |   |-- hay_model.py           # 639-compartment Hay L5PC
-|   |   |-- recording.py           # Gate/conductance/calcium recording
-|   |   |-- stimulation.py         # Synaptic input generation
-|   |   |-- run_bahl_sim.py        # Trial runner with condition mixing
-|   |   +-- circuit.py             # NetPyNE microcircuit (Phase 3)
-|   |-- surrogates/
-|   |   |-- lstm.py                # L5PC_LSTM architecture
-|   |   |-- tcn.py                 # TCN baseline (Beniaguev replication)
-|   |   |-- train.py               # Training loop (AdamW + ReduceLROnPlateau)
-|   |   +-- extract_hidden.py      # Hidden state extraction
-|   |-- probing/
-|   |   |-- ridge_probe.py         # RidgeCV dR2 probing (3 levels)
-|   |   |-- baselines.py           # Voltage-only R2 baselines
-|   |   |-- ablation.py            # Progressive clamping (causal test)
-|   |   +-- classify.py            # Final zombie/mandatory classification
-|   |-- visualization/
-|   |   |-- probe_tables.py        # dR2 tables and bar charts
-|   |   |-- ablation_curves.py     # Progressive ablation curve plots
-|   |   |-- spatial_maps.py        # Compartment-level spatial heatmaps
-|   |   +-- replacement_curves.py  # Phase 3 replacement fraction plots
-|   +-- utils/
-|       |-- io.py                  # Trial I/O, JSON helpers
-|       +-- metrics.py             # Cross-condition correlation, filters
-|-- mechanisms/                    # NEURON .mod files (11 BBP ion channels)
-|-- scripts/
-|   |-- run_phase1.py              # Phase 1 orchestrator (Steps 1-8)
-|   |-- run_phase2.py              # Phase 2 orchestrator
-|   |-- run_phase3.py              # Phase 3 orchestrator
-|   +-- generate_synthetic_data.py # Synthetic data for testing without NEURON
-+-- requirements.txt
+l5pc/
+  config.py                     # Centralised configuration
+  probing/
+    registry.py                 # Probe availability registry
+    ridge_probe.py              # Ridge delta-R2 probing (existing)
+    ablation.py                 # Causal ablation (existing)
+    mlp_probe.py                # MLP nonlinear probing control
+    sae_probe.py                # SAE superposition decomposition
+    hardening/                  # 13-method statistical hardening
+      permutation.py            # Block permutation, IAAFT, circular shift
+      diagnostics.py            # Effective DOF, Durbin-Watson, Ljung-Box
+      corrections.py            # FDR, TOST, Bayes factor
+      frequency.py              # Frequency-resolved R2, partial coherence
+      gap_cv.py                 # Gap temporal CV, cluster permutation
+    joint_alignment.py          # CCA, RSA, CKA, pi-VAE, CEBRA (Phase 2)
+    causal_probes.py            # DAS, transfer entropy (Phase 2)
+    dynamical_probes.py         # Koopman, SINDy, DSA (Phase 2)
+    topological_probes.py       # TDA / persistent homology (Phase 3)
+    information_probes.py       # MINE, MDL (Phase 3)
+    temporal_probes.py          # Temporal windows, gen matrices (Phase 3)
+  surrogates/
+    lstm.py                     # LSTM surrogate (existing)
+    tcn.py                      # TCN surrogate (existing)
+    surrogate_registry.py       # Architecture dispatch (Phase 4)
+  factory/                      # Phase 4
+    config.py                   # Thompson, DreamCoder, LLM, fitness constants
+    probe_genome.py             # ProbeGenome_v3
+    surrogate_genome.py         # SurrogateGenome_v3, composer
+    surrogate_trainer.py        # Training + output validation gate
+    surrogate_fitness.py        # Multi-objective fitness
+    verdict.py                  # ZombieVerdictGenerator_v3
+    llm_balloon.py              # LLM expansion via Anthropic API
+    dreamcoder.py               # Wake-sleep pattern synthesis
+    probing_evaluator.py        # Tiered inner loop
+    surrogate_factory.py        # 4-phase outer loop
+    orchestrator.py             # DualFactoryOrchestrator
 ```
 
-## Quick Start
+## Graceful Degradation
 
-### Prerequisites
-
-- Python 3.10+
-- NEURON 8.2+ (for simulation, Linux/macOS only)
-- PyTorch 2.0+
-- CUDA-capable GPU recommended (training + ablation)
-
-### Installation
-
-```bash
-git clone https://github.com/CharithL/L5PC.git
-cd L5PC
-pip install -r requirements.txt
-```
-
-### Running the Full Pipeline (Linux / Vast.ai)
-
-```bash
-# Mechanisms are auto-compiled in Step 1, but you can verify manually:
-cd mechanisms && nrnivmodl . && cd ..
-
-# Run all 8 steps
-python scripts/run_phase1.py
-
-# Resume from a specific step (e.g., after fixing a bug)
-python scripts/run_phase1.py --start-step 5
-
-# Re-run everything from scratch
-python scripts/run_phase1.py --force
-```
-
-### Running Without NEURON (Windows / Testing)
-
-```bash
-# Generate synthetic trial data (no NEURON required)
-python scripts/generate_synthetic_data.py
-
-# Run Steps 2-8 on synthetic data
-python scripts/run_phase1.py --start-step 2
-```
-
-## Configuration
-
-All hyperparameters are centralised in `l5pc/config.py`:
-
-| Parameter | Value | Description |
-|-----------|-------|-------------|
-| `N_TRIALS` | 500 | Total simulation trials |
-| `TRAIN_SPLIT` / `VAL_SPLIT` / `TEST_SPLIT` | 350 / 75 / 75 | Data splits |
-| `T_STEPS` | 2000 | Timesteps per trial (1s at 0.5ms resolution) |
-| `HIDDEN_SIZES` | [64, 128, 256] | LSTM hidden dimensions |
-| `DELTA_THRESHOLD_LEARNED` | 0.1 | dR2 threshold for non-zombie |
-| `CAUSAL_Z_THRESHOLD` | -2.0 | z-score threshold for causal ablation |
-| `ABLATION_K_FRACTIONS` | [0.05, 0.10, 0.20, 0.40, 0.60, 0.80] | Progressive clamping fractions |
-
-## Key Methodology
-
-### Ridge dR2 Probing
-For each biophysical variable, fit RidgeCV from **trained** hidden states and from **untrained** (random-init) hidden states:
+Core probes (Ridge, MLP, SAE, statistical hardening, resample ablation) depend only on PyTorch + scikit-learn + scipy and **never fail**. Optional probes (TDA, SINDy, CEBRA) degrade gracefully with one WARNING per session:
 
 ```
-dR2 = R2_trained - R2_untrained
+WARNING: ripser not installed - tda probes disabled (pip install ripser persim)
 ```
 
-Variables with dR2 < 0.1 are classified as **ZOMBIE**: the network carries no more information about them than random projections would.
+The registry (`AVAILABLE_PROBES`) gates the orchestrator: probes with missing deps are never scheduled.
 
-### Progressive Clamping Ablation
-For variables that pass the dR2 threshold:
+## Original Pipeline
 
-1. Rank hidden dimensions by |correlation| with the target variable
-2. For increasing k (fraction of dims), clamp the top-k% target-correlated dims to their mean
-3. Run forward pass, measure cross-condition correlation of output
-4. Compare against random clamping (repeated N times)
-5. Compute z-score: if z < -2 at any k, the variable is **MANDATORY**
+The original DESCARTES pipeline (Ridge probing, progressive clamping ablation, classification) remains fully functional. See the existing Phase 1 pipeline scripts in `scripts/run_phase1.py`. The v3.0 modules extend but never modify the original code.
 
-The **breaking point** k classifies redundancy type:
-- **Concentrated** (k < 10%): Information packed in few dimensions
-- **Distributed** (10-60%): Spread across many dimensions
-- **Redundant** (k > 60%): Highly redundant encoding
+## Source of Truth
 
-## Ion Channel Mechanisms
-
-The 11 BBP ion channel `.mod` files in `mechanisms/`:
-
-| Channel | Ion | Compartments | Role |
-|---------|-----|-------------|------|
-| NaTa_t | Na+ | soma, trunk, nexus, tuft | Fast transient sodium (AP initiation) |
-| Nap_Et2 | Na+ | soma, trunk | Persistent sodium |
-| K_Pst | K+ | soma | Persistent potassium |
-| K_Tst | K+ | soma | Transient potassium |
-| SKv3_1 | K+ | soma, trunk, nexus, tuft | Fast delayed rectifier |
-| SK_E2 | K+ | soma, nexus | Ca-activated potassium |
-| Im | K+ | soma, trunk, nexus | Muscarinic potassium |
-| Ih | HCN | all | Hyperpolarisation-activated cation |
-| Ca_HVA | Ca2+ | soma, nexus | High-voltage-activated calcium |
-| Ca_LVAst | Ca2+ | nexus, tuft | Low-voltage-activated calcium (BAC firing) |
-| CaDynamics_E2 | -- | soma, nexus | Calcium dynamics (decay/buffering) |
-
-## Stimulation Conditions
-
-Trials span five regimes to probe the full operating range:
-
-| Condition | Basal Hz | Apical Hz | Trials | Expected Behavior |
-|-----------|----------|-----------|--------|-------------------|
-| Subthreshold | 1-3 | 0-1 | 50 | No spikes (passive response) |
-| Tonic | 5-15 | 0-3 | 100 | Regular spiking |
-| Burst | 15-30 | 10-20 | 100 | Burst firing |
-| BAC | 5-10 | 10-20 | 100 | Back-propagating AP-activated Ca spike |
-| Mixed | 0-30 | 0-20 | 150 | Full dynamic range |
-
-## Expected Results (Phase 1)
-
-Based on the DESCARTES framework predictions for a 6-compartment Bahl model:
-
-### Level A (Gates)
-- Most individual gate variables (m, h) expected to be **ZOMBIE**
-- High-dimensional and redundant; surrogates bypass them
-
-### Level B (Effective Conductances) -- The Key Table
-- **g_NaTa_t (soma)**: Expected **MANDATORY CONCENTRATED** -- essential for spike initiation, encoded in few dimensions
-- **g_Ih**: Expected **MANDATORY DISTRIBUTED** -- critical for dendritic integration
-- **g_Ca_LVAst (nexus)**: Expected **MANDATORY** -- required for BAC firing
-- Some conductances may be **VOLTAGE RE-ENCODING** (decodable only through voltage correlation)
-
-### Level C (Emergent Properties)
-- **BAC firing flag**: Expected **MANDATORY** -- key L5PC computation
-- **Burst ratio**: Likely **MANDATORY** or **LEARNED BYPRODUCT**
-- **Spike count**: May be a **LEARNED BYPRODUCT** (represented but not causally used)
-
-## Outputs
-
-After a successful run, results are saved to `data/results/`:
-
-```
-data/results/
-|-- ridge_level{A,B,C}_h{64,128,256}.json   # Ridge dR2 per variable
-|-- voltage_baselines.json                    # Voltage-only R2 controls
-|-- ablation_results.json                     # Progressive clamping results
-|-- classification_summary.json               # Final variable categories
-+-- figures/
-    |-- delta_r2_level{A,B,C}_h{size}.png    # dR2 bar charts
-    |-- cross_hidden_level{A,B,C}.png        # Cross-hidden-size comparison
-    |-- ablation_{var}_h{size}.png           # Per-variable ablation curves
-    +-- mandatory_summary.png                # Summary of all mandatory variables
-```
-
-## Hardware Requirements
-
-| Step | Resource | Time Estimate |
-|------|----------|---------------|
-| Step 1 (Simulate) | CPU, NEURON | ~2 min (500 trials) |
-| Step 2 (Train) | GPU recommended | ~10-30 min (3 models) |
-| Step 3 (Extract) | GPU | ~2 min |
-| Steps 4-5 (Probe) | CPU | ~5 min |
-| Step 6 (Ablation) | GPU strongly recommended | ~30-120 min |
-| Steps 7-8 (Classify + Visualise) | CPU | < 1 min |
-
-Tested on: Vast.ai A10 GPU, RTX 5070/5080 (Windows, Steps 2-8 only).
+All v3.0 code is transcribed from `DESCARTES_DUAL_FACTORY_V3 LLM(1).md`. The guide IS the spec.
 
 ## References
 
 - Bahl et al. (2012). Automated optimization of a reduced layer 5 pyramidal cell model. *J. Neurosci. Methods*.
 - Hay et al. (2011). Models of neocortical layer 5b pyramidal cells. *PLoS Comput. Biol.*
 - Beniaguev et al. (2021). Single cortical neurons as deep artificial neural networks. *Neuron*.
+- Gao et al. (2024). Scaling and evaluating sparse autoencoders. *arXiv:2406.04093*.
+- Hewitt & Liang (2019). Designing and interpreting probes with control tasks. *EMNLP*.
+- Maris & Oostenveld (2007). Nonparametric statistical testing of EEG- and MEG-data. *J. Neurosci. Methods*.
