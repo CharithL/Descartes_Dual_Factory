@@ -127,18 +127,41 @@ def hardened_probe(hidden_trained, hidden_untrained, target,
 
 
 def _hardened_verdict(delta_r2, mlp_delta, p_block, tost, bf, freq_r2, dw):
-    """Generate definitive verdict from all statistical evidence."""
-    is_significant = p_block < 0.05
+    """Generate definitive verdict from all statistical evidence.
+
+    Decision tree:
+      1. Negative ΔR² → CONFIRMED_ZOMBIE (anti-correlated with biology;
+         autocorrelation can only inflate *positive* R², so negative ΔR²
+         is *stronger* zombie evidence when autocorrelation is present).
+      2. Non-significant p_block with positive ΔR² → LIKELY/CONFIRMED_ZOMBIE
+      3. Significant but drift-only → SPURIOUS_DRIFT
+      4. MLP gain ≫ Ridge → NONLINEAR_ENCODED
+      5. Positive ΔR² with autocorrelation → SUSPICIOUS_AUTOCORRELATION
+      6. Large ΔR² surviving all checks → CONFIRMED_ENCODED
+      7. Default → CANDIDATE_ENCODED
+    """
     is_zombie_confirmed = tost['zombie_confirmed']
     is_bf_zombie = bf['bf01'] > 3
     is_drift_only = (freq_r2.get('ultra_slow', 0) > 0.1 and
                      freq_r2.get('medium', 0) < 0.01)
     is_autocorrelated = dw < 1.0
 
+    # ── Rule 1: Negative ΔR² is unambiguous zombie evidence ──
+    # Trained model predicts biology *worse* than untrained baseline.
+    # Autocorrelation inflates positive correlations, not negative ones,
+    # so DW < 1.0 cannot explain a negative ΔR² — it only strengthens it.
+    if delta_r2 < 0:
+        return 'CONFIRMED_ZOMBIE'
+
+    # ── From here, ΔR² ≥ 0 ──
+    is_significant = p_block < 0.05
+
     if not is_significant:
         if is_zombie_confirmed and is_bf_zombie:
             return 'CONFIRMED_ZOMBIE'
         return 'LIKELY_ZOMBIE'
+
+    # ── Significant p_block with positive ΔR² — potential encoding ──
 
     if is_drift_only:
         return 'SPURIOUS_DRIFT'
@@ -146,10 +169,13 @@ def _hardened_verdict(delta_r2, mlp_delta, p_block, tost, bf, freq_r2, dw):
     if mlp_delta > delta_r2 + 0.1:
         return 'NONLINEAR_ENCODED'
 
+    # Autocorrelation flag only applies to *positive* ΔR² that could be
+    # inflated by temporal dependence. Threshold at 0.15 because small
+    # positive ΔR² with DW < 1.0 cannot be trusted.
     if is_autocorrelated and delta_r2 < 0.15:
         return 'SUSPICIOUS_AUTOCORRELATION'
 
-    if delta_r2 > 0.2 and is_significant:
+    if delta_r2 > 0.2:
         return 'CONFIRMED_ENCODED'
 
     return 'CANDIDATE_ENCODED'
