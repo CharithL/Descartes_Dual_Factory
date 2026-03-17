@@ -370,7 +370,12 @@ def main():
         logger.info("[%d/%d] %s", i + 1, len(patient_ids), pid)
         logger.info("=" * 70)
 
-        data = load_patient(patient_dir)
+        try:
+            data = load_patient(patient_dir)
+        except (FileNotFoundError, KeyError) as e:
+            logger.info("  SKIP %s: missing data files (%s)", pid, e)
+            continue
+
         cc = data['meta'].get('cc', 0)
         n_bin = data['h_bin_trained'].shape[0]
         n_win = data['h_win_trained'].shape[0]
