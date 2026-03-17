@@ -48,39 +48,66 @@ def load_hippocampal_data(data_dir):
     """Load hippocampal hidden states, targets, and variable names."""
     data_dir = Path(data_dir)
 
-    # Try common file patterns
+    # Strategy 1: Hippocampal MIMO directory structure
+    #   data_dir/hidden_states/lstm_trained.npy + data_dir/probe_targets.npy
+    hs_dir = data_dir / "hidden_states"
+    lstm_path = hs_dir / "lstm_trained.npy" if hs_dir.exists() else None
+    probe_path = data_dir / "probe_targets.npy"
+    names_path = data_dir / "probe_variable_names.json"
+
+    if lstm_path and lstm_path.exists() and probe_path.exists():
+        logger.info(f"Found hippocampal MIMO structure in {data_dir}")
+        hidden = np.load(str(lstm_path))
+        targets = np.load(str(probe_path))
+        names = None
+        if names_path.exists():
+            with open(names_path) as f:
+                names = json.load(f)
+        logger.info(f"  Hidden: {hidden.shape}, Targets: {targets.shape}, Vars: {len(names) if names else 0}")
+        return hidden, targets, names
+
+    # Strategy 2: Search subdirectories for the same structure
+    for sub in data_dir.rglob("checkpoints_rates"):
+        sub_hs = sub / "hidden_states" / "lstm_trained.npy"
+        sub_tgt = sub / "probe_targets.npy"
+        sub_names = sub / "probe_variable_names.json"
+        if sub_hs.exists() and sub_tgt.exists():
+            logger.info(f"Found hippocampal MIMO structure in {sub}")
+            hidden = np.load(str(sub_hs))
+            targets = np.load(str(sub_tgt))
+            names = None
+            if sub_names.exists():
+                with open(sub_names) as f:
+                    names = json.load(f)
+            return hidden, targets, names
+
+    # Strategy 3: Glob for common file patterns
     candidates_hidden = list(data_dir.glob("*hidden*.npy")) + list(data_dir.glob("*h_states*.npy"))
     candidates_target = list(data_dir.glob("*target*.npy")) + list(data_dir.glob("*bio*.npy"))
-    candidates_names = list(data_dir.glob("*names*.npy")) + list(data_dir.glob("*names*.json"))
+    candidates_names = list(data_dir.glob("*names*.json"))
 
+    # Strategy 4: Try npz files
     if not candidates_hidden:
-        # Try loading from a combined npz file
         npz_files = list(data_dir.glob("*.npz"))
         if npz_files:
-            data = np.load(npz_files[0], allow_pickle=True)
+            data = np.load(str(npz_files[0]))
             keys = list(data.keys())
             logger.info(f"Found npz with keys: {keys}")
             hidden = data.get("hidden_states", data.get("h_states", data[keys[0]]))
             targets = data.get("targets", data.get("bio_targets", data[keys[1]]))
-            names = data.get("variable_names", data.get("names", None))
-            if names is not None:
-                names = list(names)
-            return hidden, targets, names
+            return hidden, targets, None
 
-    hidden = np.load(candidates_hidden[0]) if candidates_hidden else None
-    targets = np.load(candidates_target[0]) if candidates_target else None
+    hidden = np.load(str(candidates_hidden[0])) if candidates_hidden else None
+    targets = np.load(str(candidates_target[0])) if candidates_target else None
     names = None
     if candidates_names:
-        p = candidates_names[0]
-        if p.suffix == ".json":
-            with open(p) as f:
-                names = json.load(f)
-        else:
-            names = list(np.load(p, allow_pickle=True))
+        with open(candidates_names[0]) as f:
+            names = json.load(f)
 
     if hidden is None or targets is None:
         raise FileNotFoundError(
             f"Could not find hidden states and targets in {data_dir}. "
+            f"Searched: hidden_states/lstm_trained.npy, *hidden*.npy, *.npz\n"
             f"Contents: {[f.name for f in data_dir.iterdir()]}"
         )
 
