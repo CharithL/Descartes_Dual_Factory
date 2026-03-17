@@ -239,9 +239,10 @@ def run_koopman(hippo_trajs, hippo_target_trajs, hippo_targets, var_names):
             'spectral_match': abs(peak_h - peak_b) < 2.0,
         }
         results[name] = result
-        logger.info("    freq_corr=%.4f  decay_corr=%.4f  match=%s",
-                     result['frequency_correlation'],
-                     result['decay_rate_correlation'],
+        logger.info("    peak_hidden=%.2f Hz  peak_bio=%.2f Hz  ratio=%.2f  match=%s",
+                     result['peak_freq_hidden_pc1'],
+                     result['peak_freq_bio'],
+                     result['freq_ratio'],
                      result['spectral_match'])
 
     # Report key frequencies
