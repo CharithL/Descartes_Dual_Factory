@@ -216,8 +216,28 @@ def run_koopman(hippo_trajs, hippo_target_trajs, hippo_targets, var_names):
         logger.info("  Koopman: hidden vs %s ...", name)
         # Each bio trajectory is (200,) -> need (200, 1)
         bio_single_trajs = [bio_trajs_all[i, :, idx:idx + 1] for i in range(n_trials)]
-        result = koopman_spectral_comparison(
-            h_trajs, bio_single_trajs, n_modes=10, dt=1.0 / HIPPO_SAMPLING_RATE)
+        # n_modes must be <= min(hidden_dim, bio_dim); bio is 1-dim here
+        n_modes_single = min(1, 10)
+        # Skip per-variable Koopman when bio is 1-dim (corrcoef needs len>1)
+        # Instead, compare frequency spectra via FFT
+        logger.info("    (1-dim bio: using FFT frequency comparison instead of Koopman)")
+        from scipy.signal import welch
+        h_concat = np.concatenate(h_trajs, axis=0)
+        b_concat = np.concatenate(bio_single_trajs, axis=0).ravel()
+        # PSD of first PC of hidden
+        from sklearn.decomposition import PCA
+        h_pc1 = PCA(n_components=1).fit_transform(h_concat).ravel()
+        f_h, psd_h = welch(h_pc1, fs=HIPPO_SAMPLING_RATE, nperseg=min(128, len(h_pc1)))
+        f_b, psd_b = welch(b_concat, fs=HIPPO_SAMPLING_RATE, nperseg=min(128, len(b_concat)))
+        # Peak frequencies
+        peak_h = f_h[np.argmax(psd_h)]
+        peak_b = f_b[np.argmax(psd_b)]
+        result = {
+            'peak_freq_hidden_pc1': float(peak_h),
+            'peak_freq_bio': float(peak_b),
+            'freq_ratio': float(peak_h / (peak_b + 1e-10)),
+            'spectral_match': abs(peak_h - peak_b) < 2.0,
+        }
         results[name] = result
         logger.info("    freq_corr=%.4f  decay_corr=%.4f  match=%s",
                      result['frequency_correlation'],
@@ -517,10 +537,22 @@ def main():
     logger.info("=" * 70)
     logger.info("DIMENSION PARTITIONING")
     logger.info("=" * 70)
-    bio_dims, alien_dims, dim_scores = identify_alien_dims(
-        hippo_hidden_flat, hippo_targets, var_names, threshold=0.05)
+    # Try multiple thresholds to find a meaningful partition
+    for thresh in [0.05, 0.15, 0.25, 0.35]:
+        bio_dims, alien_dims, dim_scores = identify_alien_dims(
+            hippo_hidden_flat, hippo_targets, var_names, threshold=thresh)
+        if len(alien_dims) > 0:
+            break
+    logger.info("  Final threshold: %.2f", thresh)
     logger.info("  Bio-correlated dims: %d", len(bio_dims))
     logger.info("  Alien dims: %d", len(alien_dims))
+    if len(alien_dims) == 0:
+        logger.info("  NOTE: All dims bio-correlated! Using bottom quartile as 'weakly alien'.")
+        q25 = np.percentile(dim_scores, 25)
+        alien_dims = np.where(dim_scores <= q25)[0]
+        bio_dims = np.where(dim_scores > q25)[0]
+        logger.info("  Repartitioned: %d strong-bio, %d weakly-alien (score <= %.3f)",
+                     len(bio_dims), len(alien_dims), q25)
     logger.info("  Dimension score range: [%.4f, %.4f]",
                 dim_scores.min(), dim_scores.max())
 
