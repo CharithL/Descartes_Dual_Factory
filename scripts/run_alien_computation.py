@@ -521,13 +521,29 @@ def run_cross_circuit_cca(hippo_hidden_flat, alien_dims, l5pc_hidden_flat):
 # ═══════════════════════════════════════════════════════════════════════
 
 def main():
+    global HIPPO_ROOT, HIPPO_RATES, HIPPO_HIDDEN, RESULTS_DIR
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--analysis', type=int, default=0,
                         help='0=all, 1=koopman, 2=sindy, 3=gates, 4=cca')
+    parser.add_argument('--data-dir', type=str, default=None,
+                        help='Override hippocampal data directory (checkpoints_rates)')
+    parser.add_argument('--output-dir', type=str, default=None,
+                        help='Override results output directory')
     args = parser.parse_args()
+
+    # Allow overriding paths for Vast.ai or other remote environments
+    if args.data_dir:
+        data_dir = Path(args.data_dir)
+        HIPPO_RATES = data_dir
+        HIPPO_HIDDEN = data_dir / 'hidden_states'
+        HIPPO_ROOT = data_dir.parent
+    if args.output_dir:
+        RESULTS_DIR = Path(args.output_dir)
 
     logger.info("DESCARTES Dual Factory v3.0 -- Alien Computation Characterization")
     logger.info("Project root: %s", PROJECT_ROOT)
+    logger.info("Hippo data: %s", HIPPO_RATES)
 
     # ── Load hippocampal data ──
     hippo_trajs = load_hippo_hidden(trained=True)
@@ -601,9 +617,10 @@ def main():
     logger.info("=" * 70)
 
     # Save
+    RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     out_path = RESULTS_DIR / 'alien_computation_results.json'
     with open(out_path, 'w') as f:
-        json.dump(all_results, f, indent=2)
+        json.dump(to_serializable(all_results), f, indent=2)
     logger.info("Saved: %s", out_path)
 
 

@@ -482,19 +482,25 @@ def main():
         "total_time_seconds": round(time.time() - T0, 1),
     }
 
-    class NumpyEncoder(json.JSONEncoder):
-        def default(self, obj):
-            if isinstance(obj, (np.floating,)):
-                return float(obj)
-            if isinstance(obj, (np.integer,)):
-                return int(obj)
-            if isinstance(obj, np.ndarray):
-                return obj.tolist()
-            return super().default(obj)
+    def _convert_numpy(obj):
+        """Recursively convert numpy types to native Python for JSON."""
+        if isinstance(obj, dict):
+            return {str(k): _convert_numpy(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_convert_numpy(v) for v in obj]
+        if isinstance(obj, (np.floating, np.float32, np.float64)):
+            return float(obj)
+        if isinstance(obj, (np.integer, np.int32, np.int64)):
+            return int(obj)
+        if isinstance(obj, (np.bool_,)):
+            return bool(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
 
     out_path = Path(args.output_dir) / "real_resample_ablation.json"
     with open(out_path, "w") as f:
-        json.dump(final, f, indent=2, cls=NumpyEncoder)
+        json.dump(_convert_numpy(final), f, indent=2)
     logger.info(f"\nSaved to {out_path}")
     logger.info(f"Total time: {time.time() - T0:.1f}s")
 
