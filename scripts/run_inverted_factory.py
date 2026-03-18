@@ -402,25 +402,46 @@ def quick_screen(model, X, Y, probes, vnames, gi, mi, hdim, device):
     if np.std(pn.ravel()) > 1e-10:
         cc = float(np.corrcoef(pn.ravel(), Y.ravel())[0, 1])
 
+    # Fix: standardize hidden states before probing.
+    # Without this, Ridge with alpha=1.0 overfits when hdim >> 128
+    # (14:1 sample/feature ratio at h=1024 with cv=3).
+    hf_mean = hf.mean(axis=0, keepdims=True)
+    hf_std = hf.std(axis=0, keepdims=True) + 1e-8
+    hf_z = (hf - hf_mean) / hf_std
+
+    # Scale Ridge alpha with hidden_dim to maintain regularization
+    # strength. At h=128 alpha=1.0 works; at h=1024 we need more.
+    alpha = max(1.0, hdim / 64.0)
+
     gr2 = float(np.mean(cross_val_score(
-        Ridge(1.0), hf, probes[:, gi], cv=3, scoring='r2')))
+        Ridge(alpha), hf_z, probes[:, gi], cv=5, scoring='r2')))
 
     mr2s = {}
     for vn, vi in zip(MANDATORY_VARS, mi):
         r2 = float(np.mean(cross_val_score(
-            Ridge(1.0), hf, probes[:, vi], cv=3, scoring='r2')))
+            Ridge(alpha), hf_z, probes[:, vi], cv=5, scoring='r2')))
         mr2s[vn] = r2
+
+    # Bio-dim counting: subsample dims if hdim is large to avoid O(hdim*n_vars*N)
+    n_check_dims = min(hdim, 256)
+    if hdim > 256:
+        # Use dims with highest variance (most informative)
+        dim_var = hf_z.var(axis=0)
+        top_dims = np.argsort(dim_var)[-n_check_dims:]
+    else:
+        top_dims = np.arange(hdim)
 
     ds = np.zeros(hdim)
     for j in range(probes.shape[1]):
-        for d in range(hdim):
-            r = abs(np.corrcoef(hf[:, d], probes[:, j])[0, 1])
+        for d in top_dims:
+            r = abs(np.corrcoef(hf_z[:, d], probes[:, j])[0, 1])
             ds[d] = max(ds[d], r)
 
     return {'output_cc': cc, 'gamma_r2': gr2, 'mandatory_r2s': mr2s,
             'mean_mandatory_r2': float(np.mean(list(mr2s.values()))),
             'n_bio_dims': int(np.sum(ds > 0.25)), 'hidden_dim': hdim,
-            'n_causal_variables': 0}
+            'n_causal_variables': 0,
+            'ridge_alpha': alpha}
 
 
 # =========================================================================
@@ -510,42 +531,61 @@ def run_campaign(data_dir, output_dir, l5pc_ckpt=None,
 
     T0 = time.time()
 
+    # Phase 1 (rounds 0-79): Round-robin, 10 per architecture
+    # Guarantees every architecture gets fair coverage before
+    # any exploitation kicks in.
+    n_archs = len(comp.ARCHITECTURES)
+    n_robin = n_archs * 10  # 80 rounds forced diversity
+    best_per_arch = {}  # track best genome per architecture
+
     for ri in range(n_rounds):
         rng = np.random.default_rng(seed + ri)
-        pf = ri / n_rounds
 
-        # Phase selection
-        if pf < 0.25:
+        # === PHASE 1: Round-robin (0 to n_robin-1) ===
+        if ri < n_robin:
+            arch_idx = ri % n_archs
+            forced_arch = comp.ARCHITECTURES[arch_idx]
             g = comp.compose_random(rng, has_l5pc)
-        elif pf < 0.50:
-            if results and rng.random() > 0.3:
+            g.architecture = forced_arch
+            round_in_arch = ri // n_archs
+            dim_cycle = [32, 64, 128, 256, 512, 1024, 16, 8, 4, 2048]
+            g.hidden_dim = dim_cycle[min(round_in_arch, len(dim_cycle) - 1)]
+            if forced_arch in ('mlp_context', 'fourier_mlp'):
+                g.context_window = int(rng.choice([5, 10, 20, 50]))
+            if forced_arch == 'fourier_mlp':
+                g.fourier_features = True
+            g.genome_id = g.fingerprint()
+
+        # === PHASE 2: Mutate best per architecture (n_robin to 60%) ===
+        elif ri < int(0.6 * n_rounds):
+            arch = rng.choice(comp.ARCHITECTURES)
+            if arch in best_per_arch:
+                g = comp.mutate(best_per_arch[arch][0], 0.4, rng, has_l5pc)
+            else:
+                g = comp.compose_random(rng, has_l5pc)
+                g.architecture = arch
+                g.genome_id = g.fingerprint()
+
+        # === PHASE 3: Crossover top performers (60% to 80%) ===
+        elif ri < int(0.8 * n_rounds):
+            if len(results) >= 2:
                 top = sorted(results, key=lambda r: r['fitness'].get(
-                    'fitness', 0), reverse=True)[:10]
+                    'fitness', 0), reverse=True)[:20]
                 pa = rng.choice([r['genome'] for r in top])
-                if rng.random() > 0.5 and len(top) >= 2:
-                    pb = rng.choice([r['genome'] for r in top])
-                    g = comp.crossover(pa, pb, rng)
-                else:
-                    g = comp.mutate(pa, rng=rng, has_l5pc=has_l5pc)
+                pb = rng.choice([r['genome'] for r in top])
+                g = comp.crossover(pa, pb, rng)
             else:
                 g = comp.compose_random(rng, has_l5pc)
-        elif pf < 0.75:
-            if best_g:
-                g = comp.mutate(best_g, 0.5, rng, has_l5pc)
-            else:
-                g = comp.compose_random(rng, has_l5pc)
+
+        # === PHASE 4: Extreme exploration (80% to 100%) ===
         else:
-            if best_g and rng.random() > 0.5:
-                g = comp.mutate(best_g, 0.7, rng, has_l5pc)
-            else:
-                g = comp.compose_random(rng, has_l5pc)
-                if rng.random() > 0.5:
-                    g.anti_bio_lambda = float(
-                        rng.choice([1.0, 5.0, 10.0]))
-                    g.anti_bio_method = 'correlation_penalty'
-                if rng.random() > 0.5:
-                    g.hidden_dim = int(
-                        rng.choice([4, 8, 1024, 2048]))
+            g = comp.compose_random(rng, has_l5pc)
+            if rng.random() > 0.3:
+                g.anti_bio_lambda = float(rng.choice([1.0, 5.0, 10.0]))
+                g.anti_bio_method = rng.choice(comp.ANTI_BIO_METHODS[1:])
+            if rng.random() > 0.3:
+                g.hidden_dim = int(rng.choice([4, 8, 2048, 4096]))
+            g.genome_id = g.fingerprint()
 
         t0 = time.time()
         hdim = g.hidden_dim
@@ -575,6 +615,12 @@ def run_campaign(data_dir, output_dir, l5pc_ckpt=None,
         else:
             stale += 1
 
+        # Track best genome per architecture for Phase 2 mutations
+        arch = g.architecture
+        cur_fit = ft.get('fitness', 0)
+        if arch not in best_per_arch or cur_fit > best_per_arch[arch][1]:
+            best_per_arch[arch] = (copy.deepcopy(g), cur_fit)
+
         logger.info(
             "  R%3d/%d [%.0fs] %s h=%d anti=%s(%.2f) "
             "| CC=%.3f g_r2=%.3f zomb=%.3f fit=%.3f [%s]",
@@ -597,6 +643,20 @@ def run_campaign(data_dir, output_dir, l5pc_ckpt=None,
     logger.info("=" * 70)
     logger.info("CAMPAIGN COMPLETE (%.1f min, %d rounds)", tt / 60, n_rounds)
     logger.info("=" * 70)
+
+    # Architecture diversity check
+    from collections import Counter
+    arch_counts = Counter(r['genome'].architecture for r in results)
+    logger.info("\nARCHITECTURE DISTRIBUTION:")
+    for arch, count in arch_counts.most_common():
+        best_cc = max((r['screen'].get('output_cc', 0)
+                       for r in results if r['genome'].architecture == arch),
+                      default=0)
+        best_zs = max((r['fitness'].get('zombie_score', 0)
+                       for r in results if r['genome'].architecture == arch),
+                      default=0)
+        logger.info("  %-15s %3d rounds  best_CC=%.3f  best_zombie=%.3f",
+                     arch, count, best_cc, best_zs)
 
     sr = sorted(results, key=lambda r: r['fitness'].get('fitness', 0),
                 reverse=True)
