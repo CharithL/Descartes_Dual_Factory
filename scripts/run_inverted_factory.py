@@ -393,26 +393,21 @@ def train_zombie(model, genome, Xtr, Ytr, Xte, Yte, gtr, gte, device):
 def quick_screen(model, X, Y, probes, vnames, gi, mi, hdim, device):
     """Probe hidden states for biological variable encoding.
 
-    Root cause of previous failures: LSTM hidden dims are highly
-    collinear (all computed from same recurrent state). Ridge on raw
-    features produces ill-conditioned matrices (rcond~3e-8) regardless
-    of alpha, giving wildly negative R2 even when raw |r|=0.75.
-
-    Fix: sklearn Pipeline with PCA(50) inside cross-validation.
-    PCA decorrelates by construction. 50 orthogonal components capture
-    the distributed signal while eliminating multicollinearity.
-    Pipeline ensures PCA is fitted per fold (no data leakage).
+    CRITICAL: Must use GroupKFold splitting by TRIAL, not random sample
+    CV. With 108 trials x 200 timesteps, random CV splits timesteps
+    within trials into train/test. Temporal autocorrelation causes Ridge
+    to overfit to temporal phase, giving wildly negative R2 (-4 to -7)
+    even when raw |r|=0.75. GroupKFold splits entire trials, preventing
+    temporal leakage. Validated: GroupKFold gives R2=+0.72, matching
+    the Phase 1 result.
     """
-    from sklearn.decomposition import PCA
-    from sklearn.pipeline import Pipeline
-
-    PCA_DIMS = 50  # orthogonal components, well-conditioned
+    from sklearn.model_selection import GroupKFold
 
     model.eval()
     Xt = torch.tensor(X, dtype=torch.float32).to(device)
     with torch.no_grad():
         pa, ha = model(Xt)
-    # Cast to float64 to avoid float32 precision issues in Ridge
+    # Cast to float64 for numerical stability
     hf_raw = ha.cpu().numpy().reshape(-1, hdim).astype(np.float64)
     pn = pa.cpu().numpy()
 
@@ -420,33 +415,31 @@ def quick_screen(model, X, Y, probes, vnames, gi, mi, hdim, device):
     if np.std(pn.ravel()) > 1e-10:
         cc = float(np.corrcoef(pn.ravel(), Y.ravel())[0, 1])
 
-    # Pipeline: PCA decorrelates, then Ridge on orthogonal components.
-    # Fitted per CV fold, so no data leakage.
-    n_components = min(PCA_DIMS, hdim)
-    pipe = Pipeline([
-        ('pca', PCA(n_components=n_components)),
-        ('ridge', Ridge(alpha=1.0))
-    ])
+    # GroupKFold by trial: prevents temporal leakage
+    n_trials = X.shape[0]
+    n_steps = X.shape[1]
+    groups = np.repeat(np.arange(n_trials), n_steps)
+    gkf = GroupKFold(n_splits=5)
 
     gr2 = float(np.mean(cross_val_score(
-        pipe, hf_raw, probes[:, gi].astype(np.float64),
-        cv=5, scoring='r2')))
+        Ridge(1.0), hf_raw, probes[:, gi].astype(np.float64),
+        cv=gkf, groups=groups, scoring='r2')))
 
     mr2s = {}
     for vn, vi in zip(MANDATORY_VARS, mi):
         r2 = float(np.mean(cross_val_score(
-            pipe, hf_raw, probes[:, vi].astype(np.float64),
-            cv=5, scoring='r2')))
+            Ridge(1.0), hf_raw, probes[:, vi].astype(np.float64),
+            cv=gkf, groups=groups, scoring='r2')))
         mr2s[vn] = r2
 
-    # Also compute raw max|r| as a Ridge-free sanity metric
+    # Raw max|r| as Ridge-free sanity metric
     n_check = min(hdim, 128)
     gamma_corrs = [abs(np.corrcoef(hf_raw[:, d],
                         probes[:, gi])[0, 1])
                    for d in range(n_check)]
     gamma_max_r = float(max(gamma_corrs)) if gamma_corrs else 0.0
 
-    # Bio-dim counting via raw correlations (robust, no Ridge needed)
+    # Bio-dim counting via raw correlations
     ds = np.zeros(n_check)
     for j in range(probes.shape[1]):
         for d in range(n_check):
@@ -457,7 +450,6 @@ def quick_screen(model, X, Y, probes, vnames, gi, mi, hdim, device):
             'mandatory_r2s': mr2s,
             'mean_mandatory_r2': float(np.mean(list(mr2s.values()))),
             'n_bio_dims': int(np.sum(ds > 0.25)), 'hidden_dim': hdim,
-            'pca_dims': n_components,
             'n_causal_variables': 0}
 
 
