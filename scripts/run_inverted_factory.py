@@ -391,57 +391,69 @@ def train_zombie(model, genome, Xtr, Ytr, Xte, Yte, gtr, gte, device):
 # =========================================================================
 
 def quick_screen(model, X, Y, probes, vnames, gi, mi, hdim, device):
+    """Probe hidden states for biological variable encoding.
+
+    Key fix: when hdim > MAX_PROBE_DIMS, reduce to PCA components first.
+    Ridge on raw h=2048 with N=21600 is ill-conditioned (rcond~1e-7),
+    producing garbage negative R2 values. PCA to 128 dims gives the
+    same well-conditioned regime as the validated Phase 1 analysis.
+    """
+    from sklearn.decomposition import PCA
+    from sklearn.preprocessing import StandardScaler
+
+    MAX_PROBE_DIMS = 128  # match Phase 1 regime
+
     model.eval()
     Xt = torch.tensor(X, dtype=torch.float32).to(device)
     with torch.no_grad():
         pa, ha = model(Xt)
-    hf = ha.cpu().numpy().reshape(-1, hdim)
+    hf_raw = ha.cpu().numpy().reshape(-1, hdim)
     pn = pa.cpu().numpy()
 
     cc = 0.0
     if np.std(pn.ravel()) > 1e-10:
         cc = float(np.corrcoef(pn.ravel(), Y.ravel())[0, 1])
 
-    # Fix: standardize hidden states before probing.
-    # Without this, Ridge with alpha=1.0 overfits when hdim >> 128
-    # (14:1 sample/feature ratio at h=1024 with cv=3).
-    hf_mean = hf.mean(axis=0, keepdims=True)
-    hf_std = hf.std(axis=0, keepdims=True) + 1e-8
-    hf_z = (hf - hf_mean) / hf_std
+    # Standardize, then PCA-reduce if needed
+    scaler = StandardScaler()
+    hf_z = scaler.fit_transform(hf_raw)
 
-    # Scale Ridge alpha with hidden_dim to maintain regularization
-    # strength. At h=128 alpha=1.0 works; at h=1024 we need more.
-    alpha = max(1.0, hdim / 64.0)
+    probe_dims = hdim
+    if hdim > MAX_PROBE_DIMS:
+        pca = PCA(n_components=MAX_PROBE_DIMS)
+        hf_probe = pca.fit_transform(hf_z)
+        probe_dims = MAX_PROBE_DIMS
+        var_explained = float(pca.explained_variance_ratio_.sum())
+    else:
+        hf_probe = hf_z
+        var_explained = 1.0
+
+    # Ridge with alpha=1.0 is well-conditioned at 128 dims
+    # (21600 samples / 128 features = 169:1 ratio)
+    alpha = 1.0
 
     gr2 = float(np.mean(cross_val_score(
-        Ridge(alpha), hf_z, probes[:, gi], cv=5, scoring='r2')))
+        Ridge(alpha), hf_probe, probes[:, gi], cv=5, scoring='r2')))
 
     mr2s = {}
     for vn, vi in zip(MANDATORY_VARS, mi):
         r2 = float(np.mean(cross_val_score(
-            Ridge(alpha), hf_z, probes[:, vi], cv=5, scoring='r2')))
+            Ridge(alpha), hf_probe, probes[:, vi], cv=5, scoring='r2')))
         mr2s[vn] = r2
 
-    # Bio-dim counting: subsample dims if hdim is large to avoid O(hdim*n_vars*N)
-    n_check_dims = min(hdim, 256)
-    if hdim > 256:
-        # Use dims with highest variance (most informative)
-        dim_var = hf_z.var(axis=0)
-        top_dims = np.argsort(dim_var)[-n_check_dims:]
-    else:
-        top_dims = np.arange(hdim)
-
-    ds = np.zeros(hdim)
+    # Bio-dim counting on PCA-reduced space
+    n_check = min(probe_dims, 128)
+    ds = np.zeros(n_check)
     for j in range(probes.shape[1]):
-        for d in top_dims:
-            r = abs(np.corrcoef(hf_z[:, d], probes[:, j])[0, 1])
+        for d in range(n_check):
+            r = abs(np.corrcoef(hf_probe[:, d], probes[:, j])[0, 1])
             ds[d] = max(ds[d], r)
 
     return {'output_cc': cc, 'gamma_r2': gr2, 'mandatory_r2s': mr2s,
             'mean_mandatory_r2': float(np.mean(list(mr2s.values()))),
             'n_bio_dims': int(np.sum(ds > 0.25)), 'hidden_dim': hdim,
-            'n_causal_variables': 0,
-            'ridge_alpha': alpha}
+            'probe_dims': probe_dims, 'pca_var_explained': var_explained,
+            'n_causal_variables': 0}
 
 
 # =========================================================================
@@ -528,6 +540,38 @@ def run_campaign(data_dir, output_dir, l5pc_ckpt=None,
     logger.info("  Rounds=%d Device=%s L5PC=%s", n_rounds, device,
                 'yes' if has_l5pc else 'no')
     logger.info("=" * 70)
+
+    # === SANITY CHECK: validate probe on vanilla LSTM ===
+    # A normal LSTM with no anti-bio penalty should give gamma_r2 > 0.
+    # The validated Phase 1 result was gamma_r2 = +0.76.
+    # If this check fails, the probe is broken and results are invalid.
+    logger.info("PROBE SANITY CHECK: training vanilla LSTM h=128...")
+    sanity_g = ZombieGenome(
+        architecture='lstm', hidden_dim=128, n_layers=2,
+        learning_rate=1e-3, anti_bio_method='none', anti_bio_lambda=0.0,
+        max_epochs=200, patience=20)
+    sanity_m = build_model(sanity_g, ni, no, device)
+    sanity_m = train_zombie(sanity_m, sanity_g, Xtr, Ytr, Xte, Yte,
+                            gtr, gte, device)
+    sanity_sc = quick_screen(sanity_m, X, Y, probes, vnames, gi, mi,
+                             128, device)
+    logger.info("  Sanity check: CC=%.3f gamma_r2=%.3f "
+                "(expected: CC~0.59, gamma_r2~+0.76)",
+                sanity_sc['output_cc'], sanity_sc['gamma_r2'])
+    if sanity_sc['gamma_r2'] < 0:
+        logger.error("  PROBE VALIDATION FAILED! gamma_r2 is negative "
+                      "for vanilla LSTM. Probe alignment is broken.")
+        logger.error("  Aborting campaign. Fix quick_screen() before "
+                      "running again.")
+        return []
+    elif sanity_sc['gamma_r2'] < 0.3:
+        logger.warning("  Probe gives low but positive gamma_r2=%.3f "
+                        "(expected ~0.76). Results may be unreliable.",
+                        sanity_sc['gamma_r2'])
+    else:
+        logger.info("  PROBE VALIDATED. gamma_r2=%.3f is in expected "
+                     "range.", sanity_sc['gamma_r2'])
+    del sanity_m  # free GPU memory
 
     T0 = time.time()
 
