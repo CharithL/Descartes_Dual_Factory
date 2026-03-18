@@ -73,8 +73,8 @@ def load_session(processed_dir, model_dir, subject, hidden_dim=64):
     hidden_untrained = dict(np.load(mdl_dir / 'hidden_untrained.npz'))
 
     # Load model for resample ablation
-    model_path = mdl_dir / 'model_best.pt'
-    model_info = json.load(open(mdl_dir / 'training_results.json'))
+    model_path = mdl_dir / 'trained_model.pt'
+    model_info = json.load(open(mdl_dir / 'output_validation.json'))
 
     n_trials = meta['n_trials']
 
