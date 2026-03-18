@@ -393,66 +393,71 @@ def train_zombie(model, genome, Xtr, Ytr, Xte, Yte, gtr, gte, device):
 def quick_screen(model, X, Y, probes, vnames, gi, mi, hdim, device):
     """Probe hidden states for biological variable encoding.
 
-    Key fix: when hdim > MAX_PROBE_DIMS, reduce to PCA components first.
-    Ridge on raw h=2048 with N=21600 is ill-conditioned (rcond~1e-7),
-    producing garbage negative R2 values. PCA to 128 dims gives the
-    same well-conditioned regime as the validated Phase 1 analysis.
+    Root cause of previous failures: LSTM hidden dims are highly
+    collinear (all computed from same recurrent state). Ridge on raw
+    features produces ill-conditioned matrices (rcond~3e-8) regardless
+    of alpha, giving wildly negative R2 even when raw |r|=0.75.
+
+    Fix: sklearn Pipeline with PCA(50) inside cross-validation.
+    PCA decorrelates by construction. 50 orthogonal components capture
+    the distributed signal while eliminating multicollinearity.
+    Pipeline ensures PCA is fitted per fold (no data leakage).
     """
     from sklearn.decomposition import PCA
-    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import Pipeline
 
-    MAX_PROBE_DIMS = 128  # match Phase 1 regime
+    PCA_DIMS = 50  # orthogonal components, well-conditioned
 
     model.eval()
     Xt = torch.tensor(X, dtype=torch.float32).to(device)
     with torch.no_grad():
         pa, ha = model(Xt)
-    hf_raw = ha.cpu().numpy().reshape(-1, hdim)
+    # Cast to float64 to avoid float32 precision issues in Ridge
+    hf_raw = ha.cpu().numpy().reshape(-1, hdim).astype(np.float64)
     pn = pa.cpu().numpy()
 
     cc = 0.0
     if np.std(pn.ravel()) > 1e-10:
         cc = float(np.corrcoef(pn.ravel(), Y.ravel())[0, 1])
 
-    # Standardize, then PCA-reduce if needed
-    scaler = StandardScaler()
-    hf_z = scaler.fit_transform(hf_raw)
-
-    probe_dims = hdim
-    if hdim > MAX_PROBE_DIMS:
-        pca = PCA(n_components=MAX_PROBE_DIMS)
-        hf_probe = pca.fit_transform(hf_z)
-        probe_dims = MAX_PROBE_DIMS
-        var_explained = float(pca.explained_variance_ratio_.sum())
-    else:
-        hf_probe = hf_z
-        var_explained = 1.0
-
-    # Ridge with alpha=1.0 is well-conditioned at 128 dims
-    # (21600 samples / 128 features = 169:1 ratio)
-    alpha = 1.0
+    # Pipeline: PCA decorrelates, then Ridge on orthogonal components.
+    # Fitted per CV fold, so no data leakage.
+    n_components = min(PCA_DIMS, hdim)
+    pipe = Pipeline([
+        ('pca', PCA(n_components=n_components)),
+        ('ridge', Ridge(alpha=1.0))
+    ])
 
     gr2 = float(np.mean(cross_val_score(
-        Ridge(alpha), hf_probe, probes[:, gi], cv=5, scoring='r2')))
+        pipe, hf_raw, probes[:, gi].astype(np.float64),
+        cv=5, scoring='r2')))
 
     mr2s = {}
     for vn, vi in zip(MANDATORY_VARS, mi):
         r2 = float(np.mean(cross_val_score(
-            Ridge(alpha), hf_probe, probes[:, vi], cv=5, scoring='r2')))
+            pipe, hf_raw, probes[:, vi].astype(np.float64),
+            cv=5, scoring='r2')))
         mr2s[vn] = r2
 
-    # Bio-dim counting on PCA-reduced space
-    n_check = min(probe_dims, 128)
+    # Also compute raw max|r| as a Ridge-free sanity metric
+    n_check = min(hdim, 128)
+    gamma_corrs = [abs(np.corrcoef(hf_raw[:, d],
+                        probes[:, gi])[0, 1])
+                   for d in range(n_check)]
+    gamma_max_r = float(max(gamma_corrs)) if gamma_corrs else 0.0
+
+    # Bio-dim counting via raw correlations (robust, no Ridge needed)
     ds = np.zeros(n_check)
     for j in range(probes.shape[1]):
         for d in range(n_check):
-            r = abs(np.corrcoef(hf_probe[:, d], probes[:, j])[0, 1])
+            r = abs(np.corrcoef(hf_raw[:, d], probes[:, j])[0, 1])
             ds[d] = max(ds[d], r)
 
-    return {'output_cc': cc, 'gamma_r2': gr2, 'mandatory_r2s': mr2s,
+    return {'output_cc': cc, 'gamma_r2': gr2, 'gamma_max_r': gamma_max_r,
+            'mandatory_r2s': mr2s,
             'mean_mandatory_r2': float(np.mean(list(mr2s.values()))),
             'n_bio_dims': int(np.sum(ds > 0.25)), 'hidden_dim': hdim,
-            'probe_dims': probe_dims, 'pca_var_explained': var_explained,
+            'pca_dims': n_components,
             'n_causal_variables': 0}
 
 
@@ -667,10 +672,11 @@ def run_campaign(data_dir, output_dir, l5pc_ckpt=None,
 
         logger.info(
             "  R%3d/%d [%.0fs] %s h=%d anti=%s(%.2f) "
-            "| CC=%.3f g_r2=%.3f zomb=%.3f fit=%.3f [%s]",
+            "| CC=%.3f g_r2=%.3f max|r|=%.3f zomb=%.3f fit=%.3f [%s]",
             ri + 1, n_rounds, dt, g.architecture, g.hidden_dim,
             g.anti_bio_method, g.anti_bio_lambda,
             sc.get('output_cc', 0), sc.get('gamma_r2', 0),
+            sc.get('gamma_max_r', 0),
             ft.get('zombie_score', 0), ft.get('fitness', 0),
             ft.get('verdict', '?'))
 
