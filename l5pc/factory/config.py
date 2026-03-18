@@ -11,8 +11,13 @@ DREAMCODER_PRUNE_THRESHOLD = 0.2  # Remove patterns below this fitness
 
 # LLM balloon
 LLM_BALLOON_THRESHOLD = 50  # Stale rounds before triggering LLM
-LLM_MODEL = 'claude-sonnet-4-20250514'
 LLM_MAX_TOKENS = 2000
+
+# LLM backend: 'anthropic' or 'ollama'
+LLM_BACKEND = 'ollama'  # Default to local Ollama
+LLM_MODEL_ANTHROPIC = 'claude-sonnet-4-20250514'
+LLM_MODEL_OLLAMA = 'llama3.1'  # Change to your preferred Ollama model
+OLLAMA_BASE_URL = 'http://localhost:11434'
 
 # Output validation gate
 OUTPUT_CC_THRESHOLD = 0.7  # Minimum cross-condition correlation to proceed

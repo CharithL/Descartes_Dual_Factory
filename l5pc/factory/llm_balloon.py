@@ -195,10 +195,18 @@ class LLMBalloonExpander:
     key is provided -- all public methods return empty lists in that case.
     """
 
+    # Supported backends
+    BACKEND_ANTHROPIC = 'anthropic'
+    BACKEND_OLLAMA = 'ollama'
+
     def __init__(self, api_key: Optional[str] = None,
-                 model: str = 'claude-sonnet-4-20250514'):
+                 model: str = 'claude-sonnet-4-20250514',
+                 backend: str = 'anthropic',
+                 ollama_base_url: str = 'http://localhost:11434'):
         self.api_key = api_key
         self.model = model
+        self.backend = backend
+        self.ollama_base_url = ollama_base_url
         self._client = None
 
     # -- public interface ---------------------------------------------------
@@ -331,13 +339,20 @@ class LLMBalloonExpander:
         return genome
 
     def _call_llm(self, prompt: str) -> str:
-        """Call the Anthropic API.  Returns '[]' on any failure.
+        """Call the LLM backend.  Returns '[]' on any failure.
 
-        Gracefully handles:
-        * Missing ``anthropic`` package
-        * Missing or invalid API key
-        * Network / API errors
+        Supports two backends:
+        * ``anthropic`` -- Anthropic Claude API (requires ``pip install anthropic``)
+        * ``ollama``    -- Local Ollama server (requires Ollama running on localhost)
+
+        Gracefully handles missing packages, keys, and network errors.
         """
+        if self.backend == self.BACKEND_OLLAMA:
+            return self._call_ollama(prompt)
+        return self._call_anthropic(prompt)
+
+    def _call_anthropic(self, prompt: str) -> str:
+        """Call Anthropic Claude API."""
         try:
             import anthropic  # noqa: F811
         except ImportError:
@@ -362,9 +377,41 @@ class LLMBalloonExpander:
                     {"role": "user", "content": prompt},
                 ],
             )
-            # Extract text from the response
             text = message.content[0].text if message.content else '[]'
             return text
         except Exception as exc:  # noqa: BLE001
-            logger.warning("LLM call failed: %s", exc)
+            logger.warning("Anthropic LLM call failed: %s", exc)
+            return '[]'
+
+    def _call_ollama(self, prompt: str) -> str:
+        """Call local Ollama server via its OpenAI-compatible API."""
+        import urllib.request
+        import urllib.error
+
+        url = f"{self.ollama_base_url}/api/chat"
+        payload = json.dumps({
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+        }).encode('utf-8')
+
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": "application/json"},
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+                text = data.get('message', {}).get('content', '[]')
+                return text
+        except urllib.error.URLError as exc:
+            logger.warning(
+                "Ollama call failed (is Ollama running at %s?): %s",
+                self.ollama_base_url, exc)
+            return '[]'
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Ollama LLM call failed: %s", exc)
             return '[]'
