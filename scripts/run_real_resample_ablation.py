@@ -482,9 +482,19 @@ def main():
         "total_time_seconds": round(time.time() - T0, 1),
     }
 
+    class NumpyEncoder(json.JSONEncoder):
+        def default(self, obj):
+            if isinstance(obj, (np.floating,)):
+                return float(obj)
+            if isinstance(obj, (np.integer,)):
+                return int(obj)
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            return super().default(obj)
+
     out_path = Path(args.output_dir) / "real_resample_ablation.json"
     with open(out_path, "w") as f:
-        json.dump(final, f, indent=2)
+        json.dump(final, f, indent=2, cls=NumpyEncoder)
     logger.info(f"\nSaved to {out_path}")
     logger.info(f"Total time: {time.time() - T0:.1f}s")
 
